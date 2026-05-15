@@ -458,7 +458,7 @@ export function InteractiveStageMap() {
       <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
         <div>
           <h2 className="text-3xl font-black tracking-normal text-sentinel-text">
-            2. Where Are the Affected Palms?
+            Affected Palm Map
           </h2>
           <p className="mt-2 text-base font-semibold leading-relaxed text-sentinel-muted">
             Red needs urgent action. Orange needs treatment. Yellow needs monitoring. Green is low priority.
@@ -502,7 +502,7 @@ export function InteractiveStageMap() {
               <div className="text-xs font-black uppercase tracking-[0.14em] text-[#BFD1C5]">Focus</div>
               <div className="mt-1 text-base font-black leading-snug text-white">TLS-scanned zone — Block 7 flagged cluster</div>
               <div className="mt-1 text-sm font-semibold leading-snug text-[#DDE8DF]">
-                Checked area: 1.5 ha GPS zone + 2-row buffer
+                Checked area: ~1.5 ha GPS zone + 2-row buffer
               </div>
             </div>
           </div>

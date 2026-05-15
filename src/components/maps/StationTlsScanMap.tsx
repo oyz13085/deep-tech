@@ -492,15 +492,19 @@ export function StationTlsScanMap({
         </div>
       </div>
 
-      <div className="absolute bottom-5 right-5 z-10 w-[24rem] max-w-[calc(100%-2rem)] rounded-2xl border border-sentinel-border bg-white p-5 shadow-2xl">
-        <div className="text-lg font-black leading-tight text-sentinel-text">Scan scope</div>
-        <div className="mt-2 text-base font-semibold leading-relaxed text-sentinel-muted">
-          Multi-station targeted TLS confirmation across the flagged GPS zone + 2-row buffer.
+      <div className="absolute bottom-5 right-5 z-10 w-[22rem] max-w-[calc(100%-2rem)] rounded-2xl border border-white/20 bg-[rgba(8,20,14,0.94)] p-4 text-white shadow-2xl backdrop-blur-xl">
+        <div className="text-xs font-black uppercase tracking-[0.14em] text-[#BFD1C5]">Scan scope</div>
+        <div className="mt-2 text-base font-black leading-snug text-white">Targeted GPS zone + 2-row buffer</div>
+        <div className="mt-3 rounded-xl border border-[#7EE2A8]/25 bg-[#7EE2A8]/12 px-3 py-2">
+          <div className="text-2xl font-black leading-tight text-[#7EE2A8]">
+            {tlsScan.palmsScanned} palm profiles captured
+          </div>
         </div>
-        <div className="mt-3 text-2xl font-black text-sentinel-primary">{tlsScan.palmsScanned} palm profiles captured</div>
-        <div className="mt-1 text-sm font-bold text-sentinel-muted">Combined TLS captures sent as TLS-derived canopy data.</div>
-        <div className="mt-1 text-sm font-bold text-sentinel-muted">Targeted TLS scan zone: ~1.5 ha.</div>
-        <div className="mt-1 text-sm font-bold text-sentinel-muted">Radius shown for demo visualisation.</div>
+        <div className="mt-3 space-y-1 text-sm font-bold leading-snug text-[#DDE8DF]">
+          <div>~1.5 ha TLS scan zone</div>
+          <div>TLS captures sent to UM IP model</div>
+          <div className="text-[#BFD1C5]">Demo visualisation</div>
+        </div>
       </div>
     </div>
   );
