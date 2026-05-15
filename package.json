@@ -1,32 +1,30 @@
 {
-  "name": "palmscan",
-  "version": "0.1.0",
+  "name": "ganoderma-sentinel",
   "private": true,
+  "version": "0.1.0",
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.96.0",
-    "@mapbox/mapbox-gl-draw": "^1.5.1",
-    "@types/mapbox__mapbox-gl-draw": "^1.4.9",
-    "lucide-react": "^1.16.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.23.26",
+    "lucide-react": "^0.555.0",
     "mapbox-gl": "^3.23.1",
-    "next": "14.2.35",
-    "react": "^18",
-    "react-dom": "^18"
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "recharts": "^3.5.1",
+    "tailwindcss": "^3.4.18",
+    "vite": "^7.2.6"
   },
   "devDependencies": {
-    "@types/mapbox-gl": "^3.4.1",
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.35",
-    "postcss": "^8",
-    "tailwindcss": "^3.4.1",
-    "typescript": "^5"
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.22",
+    "postcss": "^8.5.6",
+    "typescript": "^5.9.3"
   }
 }
