@@ -20,7 +20,7 @@ export function ProgressStepper({ currentPage }: ProgressStepperProps) {
               key={label}
               className={clsx(
                 'flex min-h-16 items-center gap-3 rounded-2xl border px-3 py-2 transition',
-                active && 'border-sentinel-primary bg-[#1F7A4D]/10',
+                active && 'border-sentinel-primary bg-[#2D6A4F]/10',
                 complete && !active && 'border-[#2EAD5B]/20 bg-[#2EAD5B]/8',
                 !complete && !active && 'border-sentinel-border bg-sentinel-surface/70',
               )}

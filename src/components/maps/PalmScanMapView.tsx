@@ -7,13 +7,14 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import PolygonEditor, { DrawnField } from '../PolygonEditor';
 import CompartmentPopup from '../CompartmentPopup';
-import { ArrowLeft, ChevronRight, Circle, Download, MousePointer2, Pencil, RotateCcw, Route, Scan, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Circle, Download, MoreHorizontal, MousePointer2, Pencil, RotateCcw, Route, Scan, Trash2, Upload, X } from 'lucide-react';
 
 interface Props {
-  drawnFields:    DrawnField[];
-  selectedId:     string | null;
-  onSelect:       (id: string) => void;
-  onFieldsChange: (fields: DrawnField[]) => void;
+  drawnFields:         DrawnField[];
+  selectedId:          string | null;
+  onSelect:            (id: string) => void;
+  onFieldsChange:      (fields: DrawnField[]) => void;
+  defaultCompartmentId?: string | null;
 }
 
 type LayerStyle = 'satellite' | 'topo' | 'slope' | 'ndvi';
@@ -422,7 +423,7 @@ function buildLabelGeoJSON(fields: DrawnField[]): GeoJSON.FeatureCollection {
   };
 }
 
-export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange }: Props) {
+export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange, defaultCompartmentId }: Props) {
   const containerRef     = useRef<HTMLDivElement>(null);
   const mapRef           = useRef<mapboxgl.Map | null>(null);
   const drawRef          = useRef<MapboxDraw | null>(null);
@@ -440,7 +441,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   const [mapReady,       setMapReady]       = useState(false);
   const [drawMode,       setDrawMode]       = useState(false);
   const [saveToast,      setSaveToast]      = useState(false);
-  const [activeCompartmentId, setActiveCompartmentId] = useState<string | null>(null);
+  const [activeCompartmentId, setActiveCompartmentId] = useState<string | null>(defaultCompartmentId ?? null);
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [annotationMode, setAnnotationMode] = useState<AnnotationMode>('select');
   const [palmStatus, setPalmStatus] = useState<PalmStatus>('healthy');
@@ -460,6 +461,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   const [editingFeature, setEditingFeature] = useState<{ id: string; coordinates: [number, number][][] } | null>(null);
   // viewingFieldId → CompartmentPopup open (read-only info)
   const [viewingFieldId, setViewingFieldId] = useState<string | null>(null);
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
 
   useEffect(() => { drawnFieldsRef.current = drawnFields; }, [drawnFields]);
   useEffect(() => { activeCompartmentIdRef.current = activeCompartmentId; }, [activeCompartmentId]);
@@ -1532,36 +1534,41 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         </div>
       )}
 
-      {/* ── Top-right: utility icon bar ──────────────────────────────────── */}
+      {/* ── Top-right: draw toggle + overflow menu ──────────────────────── */}
       <div className="absolute top-4 right-4 z-10 flex items-center gap-1.5">
-        {/* Draw toggle */}
         <IconBtn
           onClick={toggleDrawMode}
           title={drawMode ? 'Cancel drawing' : 'Draw compartment'}
-          active={drawMode}
-          danger={false}>
+          active={drawMode}>
           {drawMode ? <X className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
         </IconBtn>
 
         {!drawMode && (
-          <>
-            <IconBtn onClick={() => importInputRef.current?.click()} title="Import GeoJSON">
-              <Upload className="w-4 h-4" />
+          <div className="relative">
+            <IconBtn onClick={() => setToolMenuOpen((v) => !v)} title="Tools" active={toolMenuOpen}>
+              <MoreHorizontal className="w-4 h-4" />
             </IconBtn>
-            {drawnFields.length > 0 && (
-              <IconBtn onClick={handleExport} title="Export GeoJSON">
-                <Download className="w-4 h-4" />
-              </IconBtn>
+            {toolMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setToolMenuOpen(false)} />
+                <div className="absolute top-11 right-0 z-20 rounded-xl overflow-hidden shadow-xl min-w-[168px]"
+                  style={{ background: 'rgba(26,31,24,0.97)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.1)' }}>
+                  <ToolMenuItem icon={<Upload className="w-3.5 h-3.5" />} label="Import GeoJSON"
+                    onClick={() => { importInputRef.current?.click(); setToolMenuOpen(false); }} />
+                  {drawnFields.length > 0 && (
+                    <ToolMenuItem icon={<Download className="w-3.5 h-3.5" />} label="Export GeoJSON"
+                      onClick={() => { handleExport(); setToolMenuOpen(false); }} />
+                  )}
+                  {drawnFields.length > 0 && (
+                    <ToolMenuItem icon={<Trash2 className="w-3.5 h-3.5" />} label="Clear all" danger
+                      onClick={() => { handleClearAll(); setToolMenuOpen(false); }} />
+                  )}
+                  <ToolMenuItem icon={<RotateCcw className="w-3.5 h-3.5" />} label="Reset demo" danger
+                    onClick={() => { handleReset(); setToolMenuOpen(false); }} />
+                </div>
+              </>
             )}
-            {drawnFields.length > 0 && (
-              <IconBtn onClick={handleClearAll} title="Clear all compartments" danger>
-                <Trash2 className="w-4 h-4" />
-              </IconBtn>
-            )}
-            <IconBtn onClick={handleReset} title="Reset demo (keeps compartments)" danger>
-              <RotateCcw className="w-4 h-4" />
-            </IconBtn>
-          </>
+          </div>
         )}
       </div>
 
@@ -1886,6 +1893,26 @@ function IconBtn({
         color: active ? '#fff' : danger ? '#f87171' : '#d1d5db',
       }}>
       {children}
+    </button>
+  );
+}
+
+// ── Overflow menu item ────────────────────────────────────────────────────────
+function ToolMenuItem({
+  icon, label, danger = false, onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full items-center gap-2.5 px-4 py-2.5 text-xs font-medium transition-colors hover:bg-white/8"
+      style={{ color: danger ? '#f87171' : '#d1d5db' }}>
+      {icon}
+      {label}
     </button>
   );
 }

@@ -73,7 +73,7 @@ export function DroneScanAnimation({ scanComplete, onComplete }: DroneScanAnimat
                 <Plane className="h-8 w-8 rotate-45" />
               </div>
               <motion.div
-                className="absolute left-1/2 top-14 h-28 w-24 -translate-x-1/2 bg-gradient-to-b from-[#1F7A4D]/28 to-transparent"
+                className="absolute left-1/2 top-14 h-28 w-24 -translate-x-1/2 bg-gradient-to-b from-[#2D6A4F]/28 to-transparent"
                 style={{ clipPath: 'polygon(45% 0%, 55% 0%, 100% 100%, 0% 100%)' }}
                 animate={{ opacity: [0.35, 0.72, 0.35] }}
                 transition={{ duration: 0.9, repeat: Infinity }}

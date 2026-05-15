@@ -1,6 +1,5 @@
 export type PageId =
-  | 'drone'
-  | 'tls'
+  | 'scan'
   | 'report';
 
 export type BlockStatus =

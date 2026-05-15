@@ -15,14 +15,12 @@ export const estate = {
 };
 
 export const pageSteps: { id: PageId; label: string }[] = [
-  { id: 'drone', label: 'Drone Scan' },
-  { id: 'tls', label: 'TLS + Classification' },
+  { id: 'scan', label: 'Scan & Classify' },
   { id: 'report', label: 'Audit Report' },
 ];
 
 export const progressLabels = [
-  'Drone scanned',
-  'TLS scan + classification',
+  'Estate scan & classification',
   'Report generated',
 ];
 

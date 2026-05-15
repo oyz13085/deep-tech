@@ -298,7 +298,7 @@ export function InteractiveStageMap() {
         id: 'estate-boundary-fill',
         type: 'fill',
         source: 'estate-boundary',
-        paint: { 'fill-color': '#1F7A4D', 'fill-opacity': 0.08 },
+        paint: { 'fill-color': '#2D6A4F', 'fill-opacity': 0.08 },
       });
       map.addLayer({
         id: 'estate-boundary-line',

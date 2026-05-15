@@ -101,7 +101,7 @@ export function GanodermaMapboxFlow({
         type: 'fill',
         source: 'estate-boundary',
         paint: {
-          'fill-color': '#1F7A4D',
+          'fill-color': '#2D6A4F',
           'fill-opacity': 0.08,
         },
       });

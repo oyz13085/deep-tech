@@ -3,8 +3,8 @@
 @tailwind utilities;
 
 :root {
-  color: #17211b;
-  background: #f6f8f5;
+  color: #1c1812;
+  background: #f6f2eb;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -17,7 +17,7 @@
 
 html {
   min-width: 320px;
-  background: #f6f8f5;
+  background: #f6f2eb;
 }
 
 body {
@@ -25,8 +25,9 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at top left, rgba(46, 173, 91, 0.08), transparent 34rem),
-    linear-gradient(180deg, #f6f8f5 0%, #eef3ed 100%);
+    radial-gradient(circle at top left, rgba(93, 140, 70, 0.07), transparent 36rem),
+    radial-gradient(circle at bottom right, rgba(196, 140, 60, 0.06), transparent 28rem),
+    linear-gradient(160deg, #f6f2eb 0%, #ede6d8 100%);
 }
 
 button,

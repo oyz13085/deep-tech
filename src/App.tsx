@@ -4,14 +4,12 @@ import { AppShell } from './components/layout/AppShell';
 import { Toast } from './components/ui/Toast';
 import { pageSteps } from './data/demoData';
 import type { PageId, ToastMessage } from './types';
+import { EstateScanPage } from './pages/EstateScanPage';
 import { CompleteAuditReportPage } from './pages/CompleteAuditReportPage';
-import { DronePreScreeningPage } from './pages/DronePreScreeningPage';
-import { TlsAndClassificationPage } from './pages/TlsAndClassificationPage';
 
 export default function App() {
-  const [currentPage, setCurrentPage] = useState<PageId>('drone');
-  const [droneFlowReady, setDroneFlowReady] = useState(false);
-  const [tlsWorkflowComplete, setTlsWorkflowComplete] = useState(false);
+  const [currentPage, setCurrentPage] = useState<PageId>('scan');
+  const [scanWorkflowComplete, setScanWorkflowComplete] = useState(false);
   const [disclosureOpen, setDisclosureOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -20,41 +18,22 @@ export default function App() {
     [currentPage],
   );
 
-  const navigate = useCallback(
-    (page: PageId) => {
-      if (page === 'tls' && currentPage !== 'tls') {
-        setTlsWorkflowComplete(false);
-      }
-      setCurrentPage(page);
-    },
-    [currentPage],
-  );
+  const navigate = useCallback((page: PageId) => {
+    setCurrentPage(page);
+  }, []);
 
   const next = useCallback(() => {
     setCurrentPage((page) => {
+      if (page === 'scan' && !scanWorkflowComplete) return page;
       const index = pageSteps.findIndex((step) => step.id === page);
-      if (page === 'drone' && !droneFlowReady) {
-        return page;
-      }
-      if (page === 'tls' && !tlsWorkflowComplete) {
-        return page;
-      }
-      const nextPage = pageSteps[Math.min(index + 1, pageSteps.length - 1)].id;
-      if (nextPage === 'tls') {
-        setTlsWorkflowComplete(false);
-      }
-      return nextPage;
+      return pageSteps[Math.min(index + 1, pageSteps.length - 1)].id;
     });
-  }, [droneFlowReady, tlsWorkflowComplete]);
+  }, [scanWorkflowComplete]);
 
   const back = useCallback(() => {
     setCurrentPage((page) => {
       const index = pageSteps.findIndex((step) => step.id === page);
-      const previousPage = pageSteps[Math.max(index - 1, 0)].id;
-      if (previousPage === 'tls') {
-        setTlsWorkflowComplete(false);
-      }
-      return previousPage;
+      return pageSteps[Math.max(index - 1, 0)].id;
     });
   }, []);
 
@@ -68,45 +47,41 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'ArrowRight') {
-        next();
-      }
-      if (event.key === 'ArrowLeft') {
-        back();
-      }
-      if (event.key === 'Escape') {
-        setDisclosureOpen(false);
-      }
+      if (event.key === 'ArrowRight') next();
+      if (event.key === 'ArrowLeft')  back();
+      if (event.key === 'Escape')     setDisclosureOpen(false);
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [back, next]);
 
   const page = useMemo(() => {
     switch (currentPage) {
-      case 'drone':
-        return <DronePreScreeningPage onNavigate={navigate} onFlowReady={() => setDroneFlowReady(true)} />;
-      case 'tls':
+      case 'scan':
         return (
-          <TlsAndClassificationPage
+          <EstateScanPage
             onNavigate={navigate}
-            onWorkflowComplete={() => setTlsWorkflowComplete(true)}
+            onWorkflowComplete={() => setScanWorkflowComplete(true)}
           />
         );
       case 'report':
         return <CompleteAuditReportPage showToast={showToast} />;
       default:
-        return <DronePreScreeningPage onNavigate={navigate} onFlowReady={() => setDroneFlowReady(true)} />;
+        return (
+          <EstateScanPage
+            onNavigate={navigate}
+            onWorkflowComplete={() => setScanWorkflowComplete(true)}
+          />
+        );
     }
   }, [currentPage, navigate, showToast]);
 
   return (
     <AppShell
-      currentPage={currentPage}
       disclosureOpen={disclosureOpen}
       onOpenDisclosure={() => setDisclosureOpen(true)}
       onCloseDisclosure={() => setDisclosureOpen(false)}
+      currentPage={currentPage}
       onNavigate={navigate}
     >
       <AnimatePresence mode="wait">

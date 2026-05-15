@@ -29,7 +29,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
               className={clsx(
                 'flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left text-base font-bold transition',
                 active && 'border-sentinel-primary bg-sentinel-primary text-white shadow-soft',
-                !active && complete && 'border-sentinel-primary/20 bg-[#1F7A4D]/8 text-sentinel-deep',
+                !active && complete && 'border-sentinel-primary/20 bg-[#2D6A4F]/8 text-sentinel-deep',
                 !active && !complete && 'border-transparent text-sentinel-muted hover:bg-sentinel-surface',
               )}
             >

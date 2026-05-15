@@ -2,23 +2,41 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import {
+  AlertTriangle,
   ArrowRight,
   BrainCircuit,
   CheckCircle2,
   FileBarChart,
+  Scan,
   ScanLine,
+  ShieldAlert,
   Target,
-  Trees,
 } from 'lucide-react';
 import type { PageId } from '../types';
-import { stages, tlsScan } from '../data/demoData';
+import { stages } from '../data/demoData';
 import { ClassificationInfographic } from '../components/analysis/ClassificationInfographic';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
-import { KpiCard } from '../components/ui/KpiCard';
+import { Card } from '../components/ui/Card';
 import PalmScanShell from '../components/PalmScanShell';
 
-type TlsAndClassificationPageProps = {
+function readLiveCounts(): { healthy: number; mild: number; moderate: number; severe: number } | null {
+  try {
+    const raw = localStorage.getItem('palmscan_scan_results');
+    if (!raw) return null;
+    const all = JSON.parse(raw) as Record<string, Record<string, string>>;
+    const counts = { healthy: 0, mild: 0, moderate: 0, severe: 0 };
+    Object.values(all).forEach((compartment) => {
+      Object.values(compartment).forEach((status) => {
+        if (status in counts) counts[status as keyof typeof counts]++;
+      });
+    });
+    const total = counts.healthy + counts.mild + counts.moderate + counts.severe;
+    return total > 0 ? counts : null;
+  } catch { return null; }
+}
+
+type EstateScanPageProps = {
   onNavigate: (page: PageId) => void;
   onWorkflowComplete: () => void;
 };
@@ -26,30 +44,14 @@ type TlsAndClassificationPageProps = {
 type PipelinePhase = 'idle' | 'tls' | 'model' | 'classify' | 'report' | 'done';
 
 const pipelineCards = [
-  {
-    title: 'Targeted TLS Data',
-    subtitle: 'Combined captures from 4 scan stations',
-    icon: <ScanLine className="h-8 w-8" />,
-  },
-  {
-    title: 'UM Deep-Learning IP',
-    subtitle: 'PI 2023003250 concept',
-    icon: <BrainCircuit className="h-8 w-8" />,
-  },
-  {
-    title: 'BSR Stage Classification',
-    subtitle: 'Priority staging from TLS-derived canopy data',
-    icon: <Target className="h-8 w-8" />,
-  },
-  {
-    title: 'Dr. Palm Report',
-    subtitle: 'Actions, yield-at-risk, and audit output',
-    icon: <FileBarChart className="h-8 w-8" />,
-  },
+  { title: 'Targeted TLS Data',      subtitle: 'Combined captures from 4 scan stations',       icon: <ScanLine      className="h-8 w-8" /> },
+  { title: 'UM Deep-Learning IP',    subtitle: 'PI 2023003250 concept',                         icon: <BrainCircuit  className="h-8 w-8" /> },
+  { title: 'BSR Stage Classification', subtitle: 'Priority staging from TLS-derived canopy data', icon: <Target      className="h-8 w-8" /> },
+  { title: 'Dr. Palm Report',        subtitle: 'Actions, yield-at-risk, and audit output',      icon: <FileBarChart  className="h-8 w-8" /> },
 ];
 
 const modelStatuses: Record<PipelinePhase, string> = {
-  idle:     'Waiting for Drone Scan to complete...',
+  idle:     'Run a Drone Scan to begin the pipeline...',
   tls:      'TLS data captured — sending to UM IP model...',
   model:    'Running UM deep-learning classification...',
   classify: 'Grouping BSR priority stages...',
@@ -57,13 +59,20 @@ const modelStatuses: Record<PipelinePhase, string> = {
   done:     'Classification completed',
 };
 
-export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: TlsAndClassificationPageProps) {
-  const [scanComplete,      setScanComplete]      = useState(() => {
+export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPageProps) {
+  const [scanComplete,     setScanComplete]     = useState(() => {
     try { return localStorage.getItem('palmscan_scan_done') === 'true'; } catch { return false; }
   });
-  const [treeScanActive,    setTreeScanActive]    = useState(false);
-  const [treeScanDone,      setTreeScanDone]      = useState(false);
-  const [treeScanProgress,  setTreeScanProgress]  = useState(0);
+  const [treeScanActive,   setTreeScanActive]   = useState(false);
+  const [treeScanDone,     setTreeScanDone]     = useState(() => {
+    try {
+      const raw = localStorage.getItem('palmscan_scan_results');
+      if (!raw) return false;
+      const data = JSON.parse(raw) as Record<string, Record<string, string>>;
+      return Object.values(data).some((c) => Object.keys(c).length > 0);
+    } catch { return false; }
+  });
+  const [treeScanProgress, setTreeScanProgress] = useState(0);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -86,23 +95,21 @@ export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: Tls
     return () => window.removeEventListener('palmscan:treescan-update', handler);
   }, [onWorkflowComplete]);
 
-  // Map tree scan progress to pipeline phase
   const phase = useMemo<PipelinePhase>(() => {
-    if (treeScanDone)                        return 'done';
+    if (treeScanDone)                             return 'done';
     if (treeScanActive && treeScanProgress >= 66) return 'report';
     if (treeScanActive && treeScanProgress >= 33) return 'classify';
-    if (treeScanActive)                       return 'model';
-    if (scanComplete)                         return 'tls';
+    if (treeScanActive)                           return 'model';
+    if (scanComplete)                             return 'tls';
     return 'idle';
   }, [scanComplete, treeScanActive, treeScanDone, treeScanProgress]);
 
   const activePipelineIndex = useMemo(() => {
-    if (phase === 'idle')     return 0;
-    if (phase === 'tls')      return 0;
+    if (phase === 'idle' || phase === 'tls') return 0;
     if (phase === 'model')    return 1;
     if (phase === 'classify') return 2;
     if (phase === 'report')   return 3;
-    return 4; // all done
+    return 4;
   }, [phase]);
 
   const visibleStageCount = useMemo(() => {
@@ -110,6 +117,25 @@ export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: Tls
     if (treeScanDone) return stages.length;
     return Math.floor((treeScanProgress / 100) * stages.length);
   }, [treeScanActive, treeScanDone, treeScanProgress]);
+
+  const buildLiveStages = () => {
+    const live = readLiveCounts();
+    if (!live) return stages;
+    const countMap: Record<string, number> = {
+      stage0: live.healthy,
+      stage1: live.mild,
+      stage2: live.moderate,
+      stage34: live.severe,
+    };
+    return stages.map((s) => ({ ...s, palms: countMap[s.key] ?? s.palms }));
+  };
+
+  const [liveStages, setLiveStages] = useState(buildLiveStages);
+
+  useEffect(() => {
+    if (treeScanDone) setLiveStages(buildLiveStages());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [treeScanDone]);
 
   const analysingActive = phase === 'model' || phase === 'classify';
   const packetsActive   = phase === 'tls' || analysingActive;
@@ -121,33 +147,24 @@ export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: Tls
       exit={{ opacity: 0, y: -16 }}
       className="space-y-6"
     >
-      {/* ── Page header ────────────────────────────────────────────────── */}
-      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-end">
-        <div>
-          <Badge tone="green">Targeted TLS confirmation + UM IP analysis</Badge>
-          <h1 className="mt-4 text-4xl font-black tracking-normal text-sentinel-text md:text-5xl">
-            Compartment Scan &amp; UM IP Classification
-          </h1>
-          <p className="mt-3 max-w-6xl text-lg font-medium leading-relaxed text-sentinel-muted">
-            Draw or import your estate compartments, run a Drone Scan to flag infected areas, then drill into any
-            compartment and run a Tree Scan to classify individual palms through the UM IP pipeline.
-          </p>
-        </div>
+      {/* ── Page header ─────────────────────────────────────────────────── */}
+      <div>
+        <Badge tone="green">Map compartments → Drone Scan → Tree Scan → Classify</Badge>
+        <h1 className="mt-4 text-4xl font-black tracking-normal text-sentinel-text md:text-5xl">
+          Estate Scan &amp; UM IP Classification
+        </h1>
+        <p className="mt-3 max-w-5xl text-lg font-medium leading-relaxed text-sentinel-muted">
+          Draw or import your estate compartments, run a Drone Scan to flag infected areas, then enter any infected
+          compartment and run a Tree Scan to classify individual palms through the UM IP pipeline.
+        </p>
       </div>
 
-      {/* ── KPI cards ──────────────────────────────────────────────────── */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <KpiCard value="9m coverage radius"        label="Per TLS scan station"        icon={<Target className="h-6 w-6" />} />
-        <KpiCard value={`${tlsScan.palmsScanned}`} label="Palm profiles captured"      icon={<Trees  className="h-6 w-6" />} />
-        <KpiCard value="TLS route"                 label="Multi-station targeted scan" icon={<ScanLine className="h-6 w-6" />} />
-      </div>
-
-      {/* ── Interactive map + UM IP pipeline ───────────────────────────── */}
+      {/* ── Map + UM IP pipeline ────────────────────────────────────────── */}
       <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.15fr)_minmax(28rem,0.85fr)]">
-        {/* Map */}
+        {/* Interactive map */}
         <div
           className="w-full overflow-hidden rounded-2xl border border-sentinel-border shadow-panel"
-          style={{ height: 'calc(100vh - 420px)', minHeight: 520 }}
+          style={{ height: 'calc(100vh - 300px)', minHeight: 560 }}
         >
           <PalmScanShell />
         </div>
@@ -193,12 +210,37 @@ export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: Tls
         </div>
       </div>
 
-      {/* ── Classification infographic (appears as tree scan runs) ─────── */}
+      {/* ── Classification infographic (appears as tree scan runs) ──────── */}
       {visibleStageCount > 0 && (
-        <ClassificationInfographic stages={stages} visibleStageCount={visibleStageCount} />
+        <ClassificationInfographic stages={liveStages} visibleStageCount={visibleStageCount} />
       )}
 
-      {/* ── Next-page CTA (unlocks after tree scan) ────────────────────── */}
+      {/* ── Context cards ───────────────────────────────────────────────── */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="bg-white">
+          <ShieldAlert className="h-7 w-7 text-sentinel-primary" />
+          <h3 className="mt-4 text-xl font-black text-sentinel-text">Drone Scan</h3>
+          <p className="mt-2 text-base font-semibold leading-relaxed text-sentinel-muted">
+            Fly over all compartments to detect canopy stress patterns. Infected compartments are flagged red for targeted TLS follow-up.
+          </p>
+        </Card>
+        <Card className="bg-white">
+          <AlertTriangle className="h-7 w-7 text-sentinel-severe" />
+          <h3 className="mt-4 text-xl font-black text-sentinel-text">Investigate</h3>
+          <p className="mt-2 text-base font-semibold leading-relaxed text-sentinel-muted">
+            Enter any flagged compartment on the map to activate Tree Scan mode and classify individual palms by BSR stage.
+          </p>
+        </Card>
+        <Card className="bg-white">
+          <Scan className="h-7 w-7 text-sentinel-primary" />
+          <h3 className="mt-4 text-xl font-black text-sentinel-text">Technical boundary</h3>
+          <p className="mt-2 text-base font-semibold leading-relaxed text-sentinel-muted">
+            Drone pre-screening does not classify BSR stages. TLS-derived canopy data from the targeted zone is sent to the UM IP model for tree-level classification.
+          </p>
+        </Card>
+      </div>
+
+      {/* ── CTA (unlocks after tree scan) ───────────────────────────────── */}
       {treeScanDone && (
         <motion.div
           initial={{ opacity: 0, y: 18 }}
@@ -214,16 +256,9 @@ export function TlsAndClassificationPage({ onNavigate, onWorkflowComplete }: Tls
   );
 }
 
-// ── Pipeline step card ────────────────────────────────────────────────────────
-function PipelineStep({
-  title, subtitle, icon, active, complete, index,
-}: {
-  title: string;
-  subtitle: string;
-  icon: ReactNode;
-  active: boolean;
-  complete: boolean;
-  index: number;
+function PipelineStep({ title, subtitle, icon, active, complete, index }: {
+  title: string; subtitle: string; icon: ReactNode;
+  active: boolean; complete: boolean; index: number;
 }) {
   return (
     <motion.div
@@ -231,9 +266,7 @@ function PipelineStep({
       animate={{ opacity: 1, x: 0 }}
       transition={{ delay: index * 0.08 }}
       className={`relative rounded-2xl border p-5 shadow-soft transition ${
-        active || complete
-          ? 'border-sentinel-primary/35 bg-[#2D6A4F]/8'
-          : 'border-sentinel-border bg-white'
+        active || complete ? 'border-sentinel-primary/35 bg-[#2D6A4F]/8' : 'border-sentinel-border bg-white'
       }`}
     >
       <div className="flex items-start gap-4">
@@ -254,7 +287,6 @@ function PipelineStep({
   );
 }
 
-// ── Animated data packets flowing down the pipeline ───────────────────────────
 function PipelinePackets() {
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 h-full">
@@ -271,7 +303,6 @@ function PipelinePackets() {
   );
 }
 
-// ── Neural pulse animation ────────────────────────────────────────────────────
 function NeuralPulse() {
   return (
     <div className="mt-4 flex items-center gap-2">

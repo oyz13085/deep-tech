@@ -55,7 +55,7 @@ export function ClassificationInfographic({ stages, visibleStageCount }: Classif
             AI-assisted staging from {totalPalms} TLS-scanned palms. Ground confirmation required.
           </p>
         </div>
-        <div className="rounded-full border border-sentinel-primary/25 bg-[#1F7A4D]/8 px-4 py-2 text-sm font-black text-sentinel-primary">
+        <div className="rounded-full border border-sentinel-primary/25 bg-[#2D6A4F]/8 px-4 py-2 text-sm font-black text-sentinel-primary">
           Stage 3–4 remains one combined group
         </div>
       </div>
@@ -131,7 +131,7 @@ export function ClassificationInfographic({ stages, visibleStageCount }: Classif
                 </Pie>
                 <Tooltip
                   formatter={(value) => [`${value} palms`, 'Count']}
-                  contentStyle={{ borderRadius: 16, borderColor: '#D8E0D6', fontWeight: 700 }}
+                  contentStyle={{ borderRadius: 16, borderColor: '#D3C9B8', fontWeight: 700 }}
                 />
               </PieChart>
               <div className="pointer-events-none absolute inset-0 grid place-items-center">

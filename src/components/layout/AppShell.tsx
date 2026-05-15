@@ -1,38 +1,62 @@
 import type { ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
-import type { PageId } from '../../types';
 import { TopBar } from './TopBar';
-import { Sidebar } from './Sidebar';
+import type { PageId } from '../../types';
+import { pageSteps } from '../../data/demoData';
 
 type AppShellProps = {
   children: ReactNode;
-  currentPage: PageId;
   disclosureOpen: boolean;
   onOpenDisclosure: () => void;
   onCloseDisclosure: () => void;
+  currentPage: PageId;
   onNavigate: (page: PageId) => void;
 };
 
 export function AppShell({
   children,
-  currentPage,
   disclosureOpen,
   onOpenDisclosure,
   onCloseDisclosure,
+  currentPage,
   onNavigate,
 }: AppShellProps) {
   return (
     <div className="min-h-screen bg-transparent">
       <TopBar onOpenDisclosure={onOpenDisclosure} />
-      <div className="flex min-h-[calc(100vh-5rem)]">
-        <Sidebar currentPage={currentPage} onNavigate={onNavigate} />
-        <main className="min-w-0 flex-1 px-4 py-5 md:px-6 lg:px-8">
-          <div className="mx-auto max-w-[1500px] space-y-5">
-            {children}
-          </div>
-        </main>
-      </div>
+      <nav className="sticky top-20 z-30 border-b border-sentinel-border bg-white/92 backdrop-blur-xl no-print">
+        <div className="mx-auto flex max-w-[1500px] gap-1 px-5 lg:px-8">
+          {pageSteps.map((step, i) => {
+            const active = step.id === currentPage;
+            return (
+              <button
+                key={step.id}
+                type="button"
+                onClick={() => onNavigate(step.id)}
+                className={`relative flex items-center gap-2 px-4 py-4 text-base font-semibold transition ${
+                  active
+                    ? 'text-sentinel-primary'
+                    : 'text-sentinel-muted hover:text-sentinel-text'
+                }`}
+              >
+                <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-black ${
+                  active ? 'bg-sentinel-primary text-white' : 'bg-sentinel-surface text-sentinel-muted'
+                }`}>{i + 1}</span>
+                {step.label}
+                {active && (
+                  <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-sentinel-primary" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+      <main className="min-w-0 px-4 py-5 md:px-6 lg:px-8">
+        <div className="mx-auto max-w-[1500px] space-y-5">
+          {children}
+        </div>
+      </main>
       <AnimatePresence>
         {disclosureOpen ? (
           <motion.div
