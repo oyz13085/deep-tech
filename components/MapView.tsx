@@ -7,7 +7,7 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import PolygonEditor, { DrawnField } from './PolygonEditor';
 import CompartmentPopup from './CompartmentPopup';
-import { Circle, MousePointer2, Pencil, Route, Save, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Circle, Download, MousePointer2, Pencil, RotateCcw, Route, Scan, Trash2, Upload, X } from 'lucide-react';
 
 interface Props {
   drawnFields:    DrawnField[];
@@ -48,6 +48,22 @@ type BlockAnnotations = {
 };
 
 const ANNOTATION_STORAGE_KEY = 'palmscan_block_annotations';
+const SCAN_RESULTS_KEY        = 'palmscan_scan_results';
+
+function loadScanResults(): Record<string, Record<string, PalmStatus>> {
+  try {
+    const raw = localStorage.getItem(SCAN_RESULTS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, Record<string, PalmStatus>>) : {};
+  } catch { return {}; }
+}
+
+function saveScanResult(compartmentId: string, overrides: Record<string, PalmStatus>) {
+  try {
+    const all = loadScanResults();
+    all[compartmentId] = overrides;
+    localStorage.setItem(SCAN_RESULTS_KEY, JSON.stringify(all));
+  } catch {}
+}
 
 const STYLE_URLS: Record<LayerStyle, string> = {
   satellite: 'mapbox://styles/mapbox/satellite-v9',
@@ -68,6 +84,14 @@ const PALM_COLORS: Record<PalmStatus, string> = {
   mild: '#fbbf24',
   moderate: '#f97316',
   severe: '#ef4444',
+};
+
+// Vivid block-fill colors so severity is obvious inside a compartment
+const BLOCK_COLORS: Record<string, string> = {
+  healthy:  '#4ade80',
+  warning:  '#facc15',
+  moderate: '#fb923c',
+  severe:   '#f87171',
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -347,6 +371,35 @@ function buildUserPalmGeoJSON(annotations: BlockAnnotations, visibleBlockIds: Se
   };
 }
 
+// ── Hardcoded stress detection ───────────────────────────────────────────────
+// Edit the rules inside here to tune what the drone flags as stressed.
+function detectStressZones(fields: DrawnField[]): string[] {
+  const stressed: string[] = [];
+  for (const f of fields) {
+    if (f.status === 'severe')   { stressed.push(f.id); continue; }
+    if (f.status === 'moderate') { stressed.push(f.id); continue; }
+    if (f.status === 'warning' && f.disease !== 'None') { stressed.push(f.id); continue; }
+    // Add more rules here, e.g.:
+    // if (f.disease === 'Ganoderma') { stressed.push(f.id); continue; }
+  }
+  return stressed;
+}
+
+function buildStressGeoJSON(fields: DrawnField[], stressedIds: string[]): GeoJSON.FeatureCollection {
+  const set = new Set(stressedIds);
+  return {
+    type: 'FeatureCollection',
+    features: fields
+      .filter((f) => set.has(f.id))
+      .map((f) => ({
+        type: 'Feature' as const,
+        properties: { id: f.id, name: f.name },
+        geometry: { type: 'Polygon' as const, coordinates: f.coordinates },
+      })),
+  };
+}
+
+
 function buildCompartmentGeoJSON(fields: DrawnField[]): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
@@ -370,10 +423,13 @@ function buildLabelGeoJSON(fields: DrawnField[]): GeoJSON.FeatureCollection {
 }
 
 export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange }: Props) {
-  const containerRef   = useRef<HTMLDivElement>(null);
-  const mapRef         = useRef<mapboxgl.Map | null>(null);
-  const drawRef        = useRef<MapboxDraw | null>(null);
-  const drawnFieldsRef = useRef<DrawnField[]>(drawnFields);
+  const containerRef     = useRef<HTMLDivElement>(null);
+  const mapRef           = useRef<mapboxgl.Map | null>(null);
+  const drawRef          = useRef<MapboxDraw | null>(null);
+  const importInputRef   = useRef<HTMLInputElement>(null);
+  const drawnFieldsRef      = useRef<DrawnField[]>(drawnFields);
+  const scanIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const treeScanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeCompartmentIdRef = useRef<string | null>(null);
   const activeBlockIdRef = useRef<string | null>(null);
   const annotationModeRef = useRef<AnnotationMode>('select');
@@ -389,7 +445,17 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   const [annotationMode, setAnnotationMode] = useState<AnnotationMode>('select');
   const [palmStatus, setPalmStatus] = useState<PalmStatus>('healthy');
   const [rowStart, setRowStart] = useState<[number, number] | null>(null);
-  const [annotations, setAnnotations] = useState<BlockAnnotations>(() => loadAnnotations());
+  const [annotations,   setAnnotations]   = useState<BlockAnnotations>(() => loadAnnotations());
+  const [scanning,           setScanning]           = useState(false);
+  const [scanComplete,       setScanComplete]       = useState(() => {
+    try { return localStorage.getItem('palmscan_scan_done') === 'true'; } catch { return false; }
+  });
+  const [showDroneScanPanel, setShowDroneScanPanel] = useState(false);
+  const [stressZones,        setStressZones]        = useState<string[]>([]);
+  const [treeScanActive,      setTreeScanActive]      = useState(false);
+  const [treeScanDone,        setTreeScanDone]        = useState(false);
+  const [treeScanProgress,    setTreeScanProgress]    = useState(0);
+  const [palmStatusOverrides, setPalmStatusOverrides] = useState<Record<string, PalmStatus>>({});
   // editingFeature → PolygonEditor open (drawing new or editing existing)
   const [editingFeature, setEditingFeature] = useState<{ id: string; coordinates: [number, number][][] } | null>(null);
   // viewingFieldId → CompartmentPopup open (read-only info)
@@ -402,6 +468,16 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   useEffect(() => { palmStatusRef.current = palmStatus; }, [palmStatus]);
   useEffect(() => { rowStartRef.current = rowStart; }, [rowStart]);
   useEffect(() => { saveAnnotations(annotations); }, [annotations]);
+  useEffect(() => {
+    try { localStorage.setItem('palmscan_scan_done', String(scanComplete)); } catch {}
+    window.dispatchEvent(new CustomEvent('palmscan:scan-update', { detail: { scanComplete, scanning } }));
+  }, [scanComplete, scanning]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('palmscan:treescan-update', {
+      detail: { treeScanActive, treeScanDone, treeScanProgress },
+    }));
+  }, [treeScanActive, treeScanDone, treeScanProgress]);
 
   // ── Sync custom compartment layers when drawnFields changes ──────────────────
   useEffect(() => {
@@ -433,12 +509,107 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     if (!map || !mapReady) return;
 
     const visibleBlockIds = activeCompartmentId ? new Set([activeCompartmentId]) : new Set<string>();
-    const rowSource = map.getSource('user-row-lines') as mapboxgl.GeoJSONSource | undefined;
+    const rowSource  = map.getSource('user-row-lines') as mapboxgl.GeoJSONSource | undefined;
     const palmSource = map.getSource('user-palm-dots') as mapboxgl.GeoJSONSource | undefined;
 
     if (rowSource) rowSource.setData(buildUserRowGeoJSON(annotations, visibleBlockIds));
-    if (palmSource) palmSource.setData(buildUserPalmGeoJSON(annotations, visibleBlockIds));
-  }, [annotations, activeCompartmentId, drawnFields, mapReady]);
+    if (palmSource) {
+      const palmData = buildUserPalmGeoJSON(annotations, visibleBlockIds);
+      const hasScanColors = Object.keys(palmStatusOverrides).length > 0;
+      // Inside a compartment: show healthy until scan runs, then apply overrides
+      if (activeCompartmentId) {
+        palmData.features = palmData.features.map((f) => ({
+          ...f,
+          properties: {
+            ...f.properties,
+            status: hasScanColors
+              ? (palmStatusOverrides[f.properties?.id as string] ?? 'healthy')
+              : 'healthy',
+          },
+        }));
+      }
+      palmSource.setData(palmData);
+    }
+  }, [annotations, activeCompartmentId, drawnFields, mapReady, palmStatusOverrides]); // palmStatusOverrides drives scan coloring
+
+  // ── Load/clear tree-scan results when entering or leaving a compartment ───────
+  useEffect(() => {
+    if (!activeCompartmentId) {
+      setPalmStatusOverrides({});
+      setTreeScanDone(false);
+      setTreeScanActive(false);
+      setTreeScanProgress(0);
+      if (treeScanIntervalRef.current) {
+        clearInterval(treeScanIntervalRef.current);
+        treeScanIntervalRef.current = null;
+      }
+      return;
+    }
+    // Restore saved scan result if one exists, otherwise start fresh (all-green)
+    const saved = loadScanResults()[activeCompartmentId];
+    if (saved && Object.keys(saved).length > 0) {
+      setPalmStatusOverrides(saved);
+      setTreeScanDone(true);
+    } else {
+      setPalmStatusOverrides({});
+      setTreeScanDone(false);
+    }
+  }, [activeCompartmentId]);
+
+  // ── Reveal danger colors + stress overlay only after drone scan ──────────────
+  // Skip while drilled into a compartment so tree-scan cannot affect estate colors.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    if (activeCompartmentId) return;
+
+    // Compartment fill/outline: all-green before scan, binary after
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const binaryColor: any = scanComplete
+      ? ['case', ['==', ['get', 'status'], 'healthy'], '#166534', '#7f1d1d']
+      : '#166534';
+    if (map.getLayer('comp-fill'))    map.setPaintProperty('comp-fill',    'fill-color', binaryColor);
+    if (map.getLayer('comp-outline')) map.setPaintProperty('comp-outline', 'line-color', binaryColor);
+
+    // Stress overlay: only populate after scan
+    const stressSrc = map.getSource('stress-zones') as mapboxgl.GeoJSONSource | undefined;
+    if (stressSrc) {
+      stressSrc.setData(
+        scanComplete
+          ? buildStressGeoJSON(drawnFields, detectStressZones(drawnFields))
+          : { type: 'FeatureCollection', features: [] }
+      );
+    }
+  }, [scanComplete, drawnFields, mapReady, activeCompartmentId]);
+
+  // ── Hide stress overlay when drilling into a compartment ─────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const vis = activeCompartmentId ? 'none' : 'visible';
+    if (map.getLayer('stress-fill'))    map.setLayoutProperty('stress-fill',    'visibility', vis);
+    if (map.getLayer('stress-outline')) map.setLayoutProperty('stress-outline', 'visibility', vis);
+  }, [activeCompartmentId, mapReady]);
+
+
+  function addScanLayers(map: mapboxgl.Map) {
+    if (map.getSource('scan-swath')) return;
+
+    map.addSource('scan-swath',  { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addSource('stress-zones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+
+    // Animated scan swath — cyan sweep
+    map.addLayer({ id: 'scan-swath-fill', type: 'fill', source: 'scan-swath',
+      paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.18 } });
+    map.addLayer({ id: 'scan-swath-line', type: 'line', source: 'scan-swath',
+      paint: { 'line-color': '#38bdf8', 'line-width': 2.5, 'line-opacity': 0.95 } });
+
+    // Stress zone overlay — solid red fill + outline
+    map.addLayer({ id: 'stress-fill', type: 'fill', source: 'stress-zones',
+      paint: { 'fill-color': '#ef4444', 'fill-opacity': 0.42 } });
+    map.addLayer({ id: 'stress-outline', type: 'line', source: 'stress-zones',
+      paint: { 'line-color': '#ef4444', 'line-width': 3, 'line-opacity': 1 } });
+  }
 
   function addBlockLayers(map: mapboxgl.Map) {
     if (map.getSource('compartment-blocks')) return;
@@ -456,13 +627,13 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       source: 'compartment-blocks',
       paint: {
         'fill-color': ['match', ['get', 'status'],
-          'healthy', STATUS_COLORS.healthy,
-          'warning', STATUS_COLORS.warning,
-          'moderate', STATUS_COLORS.moderate,
-          'severe', STATUS_COLORS.severe,
+          'healthy',  BLOCK_COLORS.healthy,
+          'warning',  BLOCK_COLORS.warning,
+          'moderate', BLOCK_COLORS.moderate,
+          'severe',   BLOCK_COLORS.severe,
           '#888',
         ],
-        'fill-opacity': 0.48,
+        'fill-opacity': 0.55,
       },
     });
 
@@ -580,36 +751,24 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     map.addSource('compartments', { type: 'geojson', data: buildCompartmentGeoJSON(fields) });
     map.addSource('compartment-labels', { type: 'geojson', data: buildLabelGeoJSON(fields) });
 
-    // Fill — colour by status, darker when selected
+    // Fill — starts all-green; turns binary after drone scan
     map.addLayer({
       id: 'comp-fill',
       type: 'fill',
       source: 'compartments',
       paint: {
-        'fill-color': ['match', ['get', 'status'],
-          'healthy', STATUS_COLORS.healthy,
-          'warning', STATUS_COLORS.warning,
-          'moderate', STATUS_COLORS.moderate,
-          'severe', STATUS_COLORS.severe,
-          '#888',
-        ],
+        'fill-color': '#166534',
         'fill-opacity': ['case', ['==', ['get', 'id'], selectedId ?? ''], 0.55, 0.35],
       },
     });
 
-    // Outline — thicker when selected
+    // Outline — starts all-green; turns binary after drone scan
     map.addLayer({
       id: 'comp-outline',
       type: 'line',
       source: 'compartments',
       paint: {
-        'line-color': ['match', ['get', 'status'],
-          'healthy', STATUS_COLORS.healthy,
-          'warning', STATUS_COLORS.warning,
-          'moderate', STATUS_COLORS.moderate,
-          'severe', STATUS_COLORS.severe,
-          '#888',
-        ],
+        'line-color': '#166534',
         'line-width': ['case', ['==', ['get', 'id'], selectedId ?? ''], 3, 1.5],
         'line-opacity': 1,
       },
@@ -707,7 +866,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       styles: DRAW_STYLES,
     });
 
-    map.addControl(draw, 'top-right');
+    map.addControl(draw, 'top-left');
     map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right');
     map.addControl(new mapboxgl.ScaleControl({ unit: 'metric' }), 'bottom-left');
     drawRef.current = draw;
@@ -715,6 +874,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     map.on('load', () => {
       addCompartmentLayers(map, drawnFieldsRef.current);
       addBlockLayers(map);
+      addScanLayers(map);
 
       // Add existing polygons to GL Draw for editing support
       if (drawnFieldsRef.current.length > 0) {
@@ -760,31 +920,39 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     map.on('click', (e) => {
       const blockId = activeBlockIdRef.current;
       const mode = annotationModeRef.current;
-      if (!blockId || mode === 'select') return;
 
-      const point: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-
-      if (mode === 'palm') {
-        const id = `${blockId}-P-${Date.now()}`;
+      // Annotation drawing — only when a block is active and in draw mode
+      if (blockId && mode !== 'select') {
+        const point: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+        if (mode === 'palm') {
+          const id = `${blockId}-P-${Date.now()}`;
+          setAnnotations((prev) => ({
+            ...prev,
+            palms: [...prev.palms, { id, blockId, coordinates: point, status: palmStatusRef.current }],
+          }));
+          return;
+        }
+        const start = rowStartRef.current;
+        if (!start) { setRowStart(point); return; }
+        const id = `${blockId}-R-${Date.now()}`;
         setAnnotations((prev) => ({
           ...prev,
-          palms: [...prev.palms, { id, blockId, coordinates: point, status: palmStatusRef.current }],
+          rows: [...prev.rows, { id, blockId, coordinates: [start, point] }],
         }));
+        setRowStart(null);
         return;
       }
 
-      const start = rowStartRef.current;
-      if (!start) {
-        setRowStart(point);
-        return;
+      // Click on empty map space → exit compartment / block view
+      if (activeCompartmentIdRef.current) {
+        const hits = map.queryRenderedFeatures(e.point, { layers: ['comp-fill'] });
+        if (hits.length === 0) {
+          setActiveCompartmentId(null);
+          setActiveBlockId(null);
+          setAnnotationMode('select');
+          setRowStart(null);
+        }
       }
-
-      const id = `${blockId}-R-${Date.now()}`;
-      setAnnotations((prev) => ({
-        ...prev,
-        rows: [...prev.rows, { id, blockId, coordinates: [start, point] }],
-      }));
-      setRowStart(null);
     });
 
     mapRef.current = map;
@@ -849,6 +1017,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     map.once('styledata', () => {
       addCompartmentLayers(map, drawnFieldsRef.current);
       addBlockLayers(map);
+      addScanLayers(map);
       const activeField = drawnFieldsRef.current.find((f) => f.id === activeCompartmentId) ?? null;
       const blocks = buildBlockGeoJSON(null);
       const blockSource = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
@@ -924,6 +1093,52 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     setViewingFieldId(null);
   }, [onFieldsChange]);
 
+  // ── Reset demo colors only ────────────────────────────────────────────────────
+  // Clears scan colors (compartments back to all-green, dots back to all-green).
+  // Compartments, annotations, and row/palm data are preserved.
+  const handleReset = useCallback(() => {
+    if (!confirm('Reset scan colors? Compartments and annotations will be kept.')) return;
+
+    // Stop any running scan intervals
+    if (scanIntervalRef.current)     { clearInterval(scanIntervalRef.current);     scanIntervalRef.current = null; }
+    if (treeScanIntervalRef.current) { clearInterval(treeScanIntervalRef.current); treeScanIntervalRef.current = null; }
+
+    // Clear persisted scan state
+    try { localStorage.removeItem(SCAN_RESULTS_KEY); } catch {}
+    try { localStorage.removeItem('palmscan_scan_done'); } catch {}
+
+    // Exit any compartment/draw view so the full toolbar is visible
+    const draw = drawRef.current;
+    if (draw) draw.changeMode('simple_select');
+    setDrawMode(false);
+    setActiveCompartmentId(null);
+    setActiveBlockId(null);
+    setAnnotationMode('select');
+    setRowStart(null);
+
+    // Reset color-related state only
+    setScanComplete(false);
+    setShowDroneScanPanel(false);
+    setStressZones([]);
+    setPalmStatusOverrides({});
+    setTreeScanDone(false);
+    setTreeScanActive(false);
+    setTreeScanProgress(0);
+    setScanning(false);
+
+    // Fit map back to estate view
+    const fields = drawnFieldsRef.current;
+    if (fields.length) {
+      const points = fields.flatMap((f) => f.coordinates[0]);
+      const lngs = points.map((p) => p[0]);
+      const lats = points.map((p) => p[1]);
+      mapRef.current?.fitBounds(
+        new mapboxgl.LngLatBounds([Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]),
+        { padding: 120, maxZoom: 14.5, duration: 750 }
+      );
+    }
+  }, []);
+
   // ── Export GeoJSON ────────────────────────────────────────────────────────────
   const handleExport = useCallback(() => {
     const fields = drawnFieldsRef.current;
@@ -934,6 +1149,76 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     const a    = document.createElement('a'); a.href = url; a.download = 'compartments.geojson'; a.click();
     URL.revokeObjectURL(url);
   }, []);
+
+  // ── Import GeoJSON ────────────────────────────────────────────────────────────
+  const handleImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const fc = JSON.parse(evt.target?.result as string) as GeoJSON.FeatureCollection;
+        if (fc.type !== 'FeatureCollection') return;
+
+        const VALID_STATUS  = new Set(['healthy', 'warning', 'moderate', 'severe']);
+        const VALID_DISEASE = new Set(['None', 'Leaf Spot', 'Ganoderma', 'Bud Rot', 'Crown Disease']);
+
+        const imported: DrawnField[] = fc.features
+          .filter((f) => f.geometry?.type === 'Polygon')
+          .map((f) => {
+            const p = f.properties ?? {};
+            const drawId = (f.id as string) || `imported-${Date.now()}-${Math.random()}`;
+            return {
+              drawId,
+              id:       String(p.id   ?? drawId),
+              name:     String(p.name ?? 'Imported'),
+              status:   VALID_STATUS .has(p.status)  ? p.status  as DrawnField['status']  : 'healthy',
+              disease:  VALID_DISEASE.has(p.disease) ? p.disease as DrawnField['disease'] : 'None',
+              coordinates: (f.geometry as GeoJSON.Polygon).coordinates as [number, number][][],
+            };
+          });
+
+        if (!imported.length) return;
+
+        // Merge with existing (skip any whose drawId already exists)
+        const existing = new Set(drawnFieldsRef.current.map((f) => f.drawId));
+        const fresh    = imported.filter((f) => !existing.has(f.drawId));
+        const next     = [...drawnFieldsRef.current, ...fresh];
+        onFieldsChange(next);
+
+        // Register with GL Draw so they can be edited
+        const draw = drawRef.current;
+        if (draw) {
+          draw.add({
+            type: 'FeatureCollection',
+            features: fresh.map((f) => ({
+              id:         f.drawId,
+              type:       'Feature' as const,
+              properties: {},
+              geometry:   { type: 'Polygon' as const, coordinates: f.coordinates },
+            })),
+          });
+        }
+
+        // Fly to the imported polygons
+        const pts  = fresh.flatMap((f) => f.coordinates[0]);
+        if (pts.length) {
+          const lngs = pts.map((c) => c[0]);
+          const lats  = pts.map((c) => c[1]);
+          mapRef.current?.fitBounds(
+            new mapboxgl.LngLatBounds([Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]),
+            { padding: 120, maxZoom: 15, duration: 800 }
+          );
+        }
+      } catch {
+        // silently ignore malformed files
+      } finally {
+        // reset so the same file can be re-imported if needed
+        if (importInputRef.current) importInputRef.current.value = '';
+      }
+    };
+    reader.readAsText(file);
+  }, [onFieldsChange]);
 
   const handleBackToEstate = useCallback(() => {
     setActiveCompartmentId(null);
@@ -1019,6 +1304,186 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     setRowStart(null);
   }, []);
 
+  // ── Tree-level scan ───────────────────────────────────────────────────────────
+  // Projects each existing palm dot onto its nearest row line to determine
+  // (rowIdx, colFraction), then progressively overrides dot colors in that order.
+  const handleTreeScan = useCallback(() => {
+    const compartmentId = activeCompartmentIdRef.current;
+    if (!compartmentId || treeScanActive) return;
+
+    const compartmentPalms = annotations.palms.filter((p) => p.blockId === compartmentId);
+    if (compartmentPalms.length === 0) return;
+
+    const compartmentRows = annotations.rows.filter((r) => r.blockId === compartmentId);
+
+    type Assigned = { palm: PalmAnnotation; rowIdx: number; colFraction: number };
+
+    let assigned: Assigned[];
+
+    if (compartmentRows.length > 0) {
+      // Project each palm onto its nearest row line
+      assigned = compartmentPalms.map((palm) => {
+        let bestRow = 0, bestDist = Infinity, bestFraction = 0;
+        compartmentRows.forEach((row, rowIdx) => {
+          const [s, e] = row.coordinates;
+          const dx = e[0] - s[0], dy = e[1] - s[1];
+          const len2 = dx * dx + dy * dy;
+          if (len2 === 0) return;
+          const t = Math.max(0, Math.min(1,
+            ((palm.coordinates[0] - s[0]) * dx + (palm.coordinates[1] - s[1]) * dy) / len2
+          ));
+          const dist = Math.hypot(palm.coordinates[0] - (s[0] + t * dx), palm.coordinates[1] - (s[1] + t * dy));
+          if (dist < bestDist) { bestDist = dist; bestRow = rowIdx; bestFraction = t; }
+        });
+        return { palm, rowIdx: bestRow, colFraction: bestFraction };
+      });
+    } else {
+      // No rows defined — sort spatially (lat desc, lng asc)
+      const sorted = [...compartmentPalms].sort((a, b) =>
+        b.coordinates[1] - a.coordinates[1] || a.coordinates[0] - b.coordinates[0]
+      );
+      const perRow = Math.ceil(Math.sqrt(sorted.length));
+      assigned = sorted.map((palm, i) => ({
+        palm,
+        rowIdx: Math.floor(i / perRow),
+        colFraction: (i % perRow) / Math.max(1, perRow - 1),
+      }));
+    }
+
+    // Sort row-by-row, left-to-right within each row
+    assigned.sort((a, b) => a.rowIdx - b.rowIdx || a.colFraction - b.colFraction);
+
+    // Determine infection pattern
+    const uniqueRows = Array.from(new Set(assigned.map((a) => a.rowIdx))).sort((a, b) => a - b);
+    const srcRowIdx  = uniqueRows[Math.floor(uniqueRows.length * 0.3)] ?? 0;
+    const srcRowPalms = assigned.filter((a) => a.rowIdx === srcRowIdx);
+    const srcEntry   = srcRowPalms[Math.floor(srcRowPalms.length / 2)];
+    const srcFrac    = srcEntry?.colFraction ?? 0.5;
+
+    const targetStatuses = new Map<string, PalmStatus>();
+    assigned.forEach(({ palm, rowIdx, colFraction }) => {
+      const rd = rowIdx - srcRowIdx;
+      const cd = Math.abs(colFraction - srcFrac);
+      let status: PalmStatus;
+      if (palm.id === srcEntry?.palm.id) {
+        status = 'severe';
+      } else if (rd === 2 && (Math.abs(colFraction - (srcFrac - 0.08)) < 0.05 || Math.abs(colFraction - (srcFrac + 0.15)) < 0.05)) {
+        status = 'severe';
+      } else if (rd >= 0 && rd <= 1 && cd < 0.18) {
+        status = 'moderate';
+      } else if (rd === 2 && cd < 0.22) {
+        status = 'moderate';
+      } else if (rd === 3 && cd < 0.16) {
+        status = 'mild';
+      } else {
+        status = 'healthy';
+      }
+      targetStatuses.set(palm.id, status);
+    });
+
+    // Dots are already green from compartment entry — just start the scan
+    setPalmStatusOverrides({});
+    setTreeScanActive(true);
+    setTreeScanDone(false);
+    setTreeScanProgress(0);
+
+    const total = assigned.length;
+    let idx = 0;
+    if (treeScanIntervalRef.current) clearInterval(treeScanIntervalRef.current);
+    treeScanIntervalRef.current = setInterval(() => {
+      if (idx >= total) {
+        clearInterval(treeScanIntervalRef.current!);
+        treeScanIntervalRef.current = null;
+        // Build final overrides map and persist to localStorage
+        const finalOverrides: Record<string, PalmStatus> = {};
+        assigned.forEach(({ palm }) => {
+          finalOverrides[palm.id] = targetStatuses.get(palm.id) ?? 'healthy';
+        });
+        saveScanResult(compartmentId, finalOverrides);
+        setTreeScanProgress(100);
+        setTreeScanActive(false);
+        setTreeScanDone(true);
+        return;
+      }
+      const palmId = assigned[idx].palm.id;
+      const status = targetStatuses.get(palmId) ?? 'healthy';
+      setPalmStatusOverrides((prev) => ({ ...prev, [palmId]: status }));
+      idx++;
+      setTreeScanProgress(Math.round((idx / total) * 100));
+    }, 25);
+  }, [treeScanActive, annotations.palms, annotations.rows]);
+
+  // ── Drone scan ────────────────────────────────────────────────────────────────
+  const handleDroneScan = useCallback(() => {
+    const map = mapRef.current;
+    const fields = drawnFieldsRef.current;
+    if (!map || fields.length === 0 || scanning) return;
+
+    setShowDroneScanPanel(false);
+    setStressZones([]);
+    setScanning(true);
+
+    const allCoords = fields.flatMap((f) => f.coordinates[0]);
+    const minLng = Math.min(...allCoords.map((c) => c[0]));
+    const maxLng = Math.max(...allCoords.map((c) => c[0]));
+    const minLat = Math.min(...allCoords.map((c) => c[1]));
+    const maxLat = Math.max(...allCoords.map((c) => c[1]));
+
+    // Zoom out to show the whole estate during scan
+    map.fitBounds(
+      new mapboxgl.LngLatBounds([minLng, minLat], [maxLng, maxLat]),
+      { padding: 80, maxZoom: 15, duration: 800 }
+    );
+
+    const STEPS = 80;
+    const swathH = (maxLat - minLat) / 10;
+    let step = 0;
+
+    if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
+
+    scanIntervalRef.current = setInterval(() => {
+      step += 1;
+      const progress = step / STEPS;
+      const top = minLat + (maxLat - minLat) * progress;
+      const bottom = Math.max(minLat, top - swathH);
+
+      const swathSrc = map.getSource('scan-swath') as mapboxgl.GeoJSONSource | undefined;
+      if (swathSrc) {
+        swathSrc.setData({
+          type: 'FeatureCollection',
+          features: [{
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'Polygon',
+              coordinates: [[
+                [minLng - 0.002, bottom],
+                [maxLng + 0.002, bottom],
+                [maxLng + 0.002, top],
+                [minLng - 0.002, top],
+                [minLng - 0.002, bottom],
+              ]],
+            },
+          }],
+        });
+      }
+
+      if (step >= STEPS) {
+        clearInterval(scanIntervalRef.current!);
+        scanIntervalRef.current = null;
+        // Clear the swath line
+        const src = map.getSource('scan-swath') as mapboxgl.GeoJSONSource | undefined;
+        if (src) src.setData({ type: 'FeatureCollection', features: [] });
+        // Reveal stress overlay
+        const stressed = detectStressZones(fields);
+        setStressZones(stressed);
+        setScanning(false);
+        setScanComplete(true);
+        setShowDroneScanPanel(true);
+      }
+    }, 50);
+  }, [scanning]);
+
   const viewingField = drawnFields.find((f) => f.id === viewingFieldId) ?? null;
   const activeCompartment = drawnFields.find((f) => f.id === activeCompartmentId) ?? null;
   const activeBlock = activeCompartment && activeBlockId === activeCompartment.id
@@ -1038,8 +1503,10 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   return (
     <div className="relative w-full h-full">
       <div ref={containerRef} className="map-container" />
+      {/* Hidden file input for GeoJSON import */}
+      <input ref={importInputRef} type="file" accept=".geojson,.json" className="hidden" onChange={handleImport} />
 
-      {/* Layer tabs */}
+      {/* ── Top-left: layer tabs ─────────────────────────────────────────── */}
       <div className="absolute top-4 left-4 z-10 flex gap-1 rounded-xl p-1"
         style={{ background: 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)' }}>
         {(['satellite','topo','slope','ndvi'] as LayerStyle[]).map((key) => (
@@ -1051,49 +1518,55 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         ))}
       </div>
 
-      {/* Top-centre toolbar */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
-        <button onClick={toggleDrawMode}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium shadow-lg transition-all"
-          style={{ background: drawMode ? '#e07c3a' : 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)', border: drawMode ? '1.5px solid #e07c3a' : '1.5px solid rgba(255,255,255,0.08)', color: '#fff' }}>
-          {drawMode ? <X className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
-          {drawMode ? 'Cancel Drawing' : 'Draw Compartment'}
-        </button>
+      {/* ── Compartment breadcrumb — below layer tabs, top-left ──────────── */}
+      {activeCompartment && !drawMode && (
+        <div className="absolute top-16 left-4 z-10 flex items-center gap-1.5 rounded-xl px-3 py-2 shadow-lg"
+          style={{ background: 'rgba(26,31,24,0.88)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <button onClick={handleBackToEstate}
+            className="flex items-center gap-1 text-gray-400 hover:text-white transition-colors text-xs">
+            <ArrowLeft className="w-3 h-3" /> Estate
+          </button>
+          <ChevronRight className="w-3 h-3 text-gray-600" />
+          <span className="text-xs font-semibold text-white">{activeCompartment.id}</span>
+          <span className="text-xs text-gray-400 truncate max-w-[120px]">· {activeCompartment.name}</span>
+        </div>
+      )}
 
-        {drawnFields.length > 0 && !drawMode && (
+      {/* ── Top-right: utility icon bar ──────────────────────────────────── */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-1.5">
+        {/* Draw toggle */}
+        <IconBtn
+          onClick={toggleDrawMode}
+          title={drawMode ? 'Cancel drawing' : 'Draw compartment'}
+          active={drawMode}
+          danger={false}>
+          {drawMode ? <X className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
+        </IconBtn>
+
+        {!drawMode && (
           <>
-            <button onClick={handleExport}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-200 hover:text-white shadow-lg transition-all"
-              style={{ background: 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)', border: '1.5px solid rgba(255,255,255,0.08)' }}>
-              <Save className="w-3 h-3" /> Export GeoJSON
-            </button>
-            <button onClick={handleClearAll}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-red-400 hover:text-red-300 shadow-lg transition-all"
-              style={{ background: 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)', border: '1.5px solid rgba(255,255,255,0.08)' }}>
-              <Trash2 className="w-3 h-3" /> Clear All
-            </button>
+            <IconBtn onClick={() => importInputRef.current?.click()} title="Import GeoJSON">
+              <Upload className="w-4 h-4" />
+            </IconBtn>
+            {drawnFields.length > 0 && (
+              <IconBtn onClick={handleExport} title="Export GeoJSON">
+                <Download className="w-4 h-4" />
+              </IconBtn>
+            )}
+            {drawnFields.length > 0 && (
+              <IconBtn onClick={handleClearAll} title="Clear all compartments" danger>
+                <Trash2 className="w-4 h-4" />
+              </IconBtn>
+            )}
+            <IconBtn onClick={handleReset} title="Reset demo (keeps compartments)" danger>
+              <RotateCcw className="w-4 h-4" />
+            </IconBtn>
           </>
         )}
       </div>
 
-      {activeCompartment && !drawMode && (
-        <div className="absolute top-16 left-4 z-10 flex items-center gap-2 rounded-xl px-3 py-2 shadow-lg"
-          style={{ background: 'rgba(26,31,24,0.88)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <button
-            onClick={handleBackToEstate}
-            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white"
-            style={{ background: '#e07c3a' }}>
-            Back to estate
-          </button>
-          <div>
-            <p className="text-[10px] uppercase tracking-wider text-gray-400">Row definition view</p>
-            <p className="text-xs font-semibold text-white">{activeCompartment.id} · {activeCompartment.name}</p>
-          </div>
-        </div>
-      )}
-
       {activeBlock && !drawMode && (
-        <div className="absolute top-16 right-4 z-10 w-[310px] rounded-xl p-3 shadow-xl"
+        <div className="absolute top-20 right-4 z-10 w-[310px] rounded-xl p-3 shadow-xl"
           style={{ background: 'rgba(26,31,24,0.9)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.08)' }}>
           <div className="flex items-start justify-between gap-3 mb-3">
             <div>
@@ -1187,23 +1660,179 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         </div>
       )}
 
-      {/* Legend */}
-      <div className="absolute bottom-10 left-4 z-10 rounded-xl p-3"
+      {/* Legend — estate view: binary; compartment view: severity */}
+      <div className="absolute bottom-24 left-4 z-10 rounded-xl p-3"
         style={{ background: 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)' }}>
-        <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Status</p>
-        {Object.entries(STATUS_COLORS).map(([status, color]) => (
-          <div key={status} className="flex items-center gap-2 mb-1">
-            <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: color }} />
-            <span className="text-xs text-gray-300 capitalize">{status}</span>
-          </div>
-        ))}
+        {activeCompartmentId ? (
+          <>
+            <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Tree Severity</p>
+            {[
+              { label: 'Healthy',  color: BLOCK_COLORS.healthy  },
+              { label: 'Warning',  color: BLOCK_COLORS.warning  },
+              { label: 'Moderate', color: BLOCK_COLORS.moderate },
+              { label: 'Severe',   color: BLOCK_COLORS.severe   },
+            ].map(({ label, color }) => (
+              <div key={label} className="flex items-center gap-2 mb-1">
+                <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
+                <span className="text-xs text-gray-300">{label}</span>
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Compartment</p>
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#166534' }} />
+              <span className="text-xs text-gray-300">Safe</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#7f1d1d' }} />
+              <span className="text-xs text-gray-300">Dangerous</span>
+            </div>
+          </>
+        )}
       </div>
+
+      {/* Tree scan results panel */}
+      {treeScanDone && activeCompartmentId && (
+        <div className="absolute bottom-24 right-4 z-20 w-56 rounded-xl overflow-hidden shadow-xl"
+          style={{ background: 'rgba(26,31,24,0.93)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <div className="px-3 py-2.5 border-b border-white/8">
+            <p className="text-[9px] uppercase tracking-wider text-gray-400 font-semibold">Tree Scan · {activeCompartmentId}</p>
+            <p className="text-xs font-semibold text-white mt-0.5">{Object.keys(palmStatusOverrides).length} trees scanned</p>
+          </div>
+          <div className="px-3 py-2.5 flex flex-col gap-1.5">
+            {[
+              { key: 'healthy',  label: 'Healthy',  color: BLOCK_COLORS.healthy  },
+              { key: 'mild',     label: 'Mild',     color: BLOCK_COLORS.warning  },
+              { key: 'moderate', label: 'Moderate', color: BLOCK_COLORS.moderate },
+              { key: 'severe',   label: 'Severe',   color: BLOCK_COLORS.severe   },
+            ].map(({ key, label, color }) => {
+              const total = Object.keys(palmStatusOverrides).length;
+              const count = Object.values(palmStatusOverrides).filter((s) => s === key).length;
+              const pct   = total ? Math.round((count / total) * 100) : 0;
+              return (
+                <div key={key}>
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-[10px] text-gray-300">{label}</span>
+                    <span className="text-[10px] font-mono text-gray-400">{count} ({pct}%)</span>
+                  </div>
+                  <div className="w-full h-1.5 rounded-full bg-white/10">
+                    <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="px-3 pb-2.5">
+            <p className="text-[10px] text-yellow-400 leading-relaxed">
+              ⚠ Infection source detected · 2 severe cases propagated 2 rows downstream
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bottom-centre: primary action dock ──────────────────────────── */}
+      {!drawMode && (
+        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-2">
+
+          {/* Drone scan CTA — estate view, before scan */}
+          {!activeCompartmentId && drawnFields.length > 0 && !scanComplete && !scanning && (
+            <button
+              onClick={handleDroneScan}
+              className="btn-cta-ring flex items-center gap-2.5 px-6 py-3 rounded-2xl text-sm font-semibold text-white shadow-2xl transition-all hover:brightness-110"
+              style={{ background: '#e07c3a', border: '1.5px solid rgba(255,255,255,0.2)' }}>
+              <Scan className="w-4 h-4" />
+              ① Drone Scan Estate
+            </button>
+          )}
+
+          {/* Drone scanning in progress */}
+          {scanning && (
+            <div className="flex items-center gap-3 px-5 py-3 rounded-2xl shadow-xl"
+              style={{ background: 'rgba(26,31,24,0.95)', backdropFilter: 'blur(12px)', border: '1.5px solid rgba(56,189,248,0.4)' }}>
+              <Scan className="w-4 h-4 text-sky-400 animate-pulse flex-shrink-0" />
+              <div>
+                <p className="text-xs font-semibold text-sky-300 mb-1">Drone scanning estate…</p>
+                <div className="w-44 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div className="h-full rounded-full bg-sky-400 animate-[scan-progress_4s_linear_forwards]" style={{ width: '100%' }} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Drone scan done — prompt to enter compartment */}
+          {!activeCompartmentId && scanComplete && !scanning && showDroneScanPanel && (
+            <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl shadow-xl"
+              style={{ background: 'rgba(26,31,24,0.92)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <div className="flex items-center gap-2">
+                {stressZones.length > 0 ? (
+                  <>
+                    <div className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                    <span className="text-xs text-red-300 font-medium">
+                      {stressZones.length} infected compartment{stressZones.length !== 1 ? 's' : ''} — tap one to investigate
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-2 h-2 rounded-full bg-green-400" />
+                    <span className="text-xs text-green-300 font-medium">All compartments healthy</span>
+                  </>
+                )}
+              </div>
+              <button onClick={() => setShowDroneScanPanel(false)}
+                className="text-gray-600 hover:text-gray-400 transition-colors ml-1">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Tree scan CTA — inside compartment, after drone scan */}
+          {activeCompartmentId && scanComplete && !treeScanDone && !treeScanActive && (
+            <button
+              onClick={handleTreeScan}
+              className="btn-cta-ring flex items-center gap-2.5 px-6 py-3 rounded-2xl text-sm font-semibold text-white shadow-2xl transition-all hover:brightness-110"
+              style={{ background: '#e07c3a', border: '1.5px solid rgba(255,255,255,0.2)' }}>
+              <Scan className="w-4 h-4" />
+              ③ Tree Scan Compartment
+            </button>
+          )}
+
+          {/* Tree scan done badge */}
+          {activeCompartmentId && treeScanDone && (
+            <div className="flex items-center gap-2 px-4 py-2 rounded-2xl shadow-lg"
+              style={{ background: 'rgba(22,101,52,0.9)', backdropFilter: 'blur(8px)', border: '1px solid rgba(74,222,128,0.3)' }}>
+              <div className="w-2 h-2 rounded-full bg-green-400" />
+              <span className="text-xs font-semibold text-green-200">Tree scan complete</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Tree scan progress bar — full-width bottom strip ─────────────── */}
+      {treeScanActive && (
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-6 py-3 flex items-center gap-4"
+          style={{ background: 'rgba(22,28,20,0.97)', backdropFilter: 'blur(12px)', borderTop: '1px solid rgba(56,189,248,0.25)' }}>
+          <Scan className="w-4 h-4 text-sky-400 animate-pulse flex-shrink-0" />
+          <div className="flex-1">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-semibold text-sky-300">Tree-level scan in progress</span>
+              <span className="text-[11px] font-mono text-sky-400">{treeScanProgress}%</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full rounded-full bg-sky-400 transition-all duration-75"
+                style={{ width: `${treeScanProgress}%` }} />
+            </div>
+          </div>
+          <span className="text-[10px] text-gray-500 flex-shrink-0 font-mono">{activeCompartmentId}</span>
+        </div>
+      )}
 
       {/* Save toast */}
       {saveToast && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-white shadow-xl pointer-events-none"
           style={{ background: '#166534' }}>
-          <Save className="w-3.5 h-3.5" /> Compartment saved
+          Compartment saved
         </div>
       )}
 
@@ -1232,5 +1861,31 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         />
       )}
     </div>
+  );
+}
+
+// ── Icon-only utility button ──────────────────────────────────────────────────
+function IconBtn({
+  onClick, title, active = false, danger = false, children,
+}: {
+  onClick: () => void;
+  title: string;
+  active?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="w-9 h-9 flex items-center justify-center rounded-xl shadow-lg transition-all hover:brightness-125"
+      style={{
+        background: active ? '#e07c3a' : 'rgba(26,31,24,0.88)',
+        backdropFilter: 'blur(8px)',
+        border: active ? '1.5px solid #e07c3a' : '1.5px solid rgba(255,255,255,0.08)',
+        color: active ? '#fff' : danger ? '#f87171' : '#d1d5db',
+      }}>
+      {children}
+    </button>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { DrawnField } from './PolygonEditor';
 import Sidebar from './Sidebar';
@@ -35,6 +35,34 @@ const MapView = dynamic(() => import('./MapView'), {
 export default function DashboardShell() {
   const [drawnFields, setDrawnFields] = useState<DrawnField[]>(() => loadFromStorage());
   const [selectedId,  setSelectedId]  = useState<string | null>(null);
+  const [scanComplete, setScanComplete] = useState<boolean>(() => {
+    try { return localStorage.getItem('palmscan_scan_done') === 'true'; } catch { return false; }
+  });
+  const [scanning,         setScanning]         = useState(false);
+  const [treeScanActive,   setTreeScanActive]   = useState(false);
+  const [treeScanDone,     setTreeScanDone]     = useState(false);
+  const [treeScanProgress, setTreeScanProgress] = useState(0);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ scanComplete: boolean; scanning: boolean }>;
+      setScanComplete(ce.detail.scanComplete);
+      setScanning(ce.detail.scanning);
+    };
+    window.addEventListener('palmscan:scan-update', handler);
+    return () => window.removeEventListener('palmscan:scan-update', handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ treeScanActive: boolean; treeScanDone: boolean; treeScanProgress: number }>;
+      setTreeScanActive(ce.detail.treeScanActive);
+      setTreeScanDone(ce.detail.treeScanDone);
+      setTreeScanProgress(ce.detail.treeScanProgress);
+    };
+    window.addEventListener('palmscan:treescan-update', handler);
+    return () => window.removeEventListener('palmscan:treescan-update', handler);
+  }, []);
 
   const handleFieldsChange = useCallback((fields: DrawnField[]) => {
     setDrawnFields(fields);
@@ -53,6 +81,11 @@ export default function DashboardShell() {
         fields={drawnFields}
         selectedId={selectedId}
         onSelect={handleSelect}
+        scanComplete={scanComplete}
+        scanning={scanning}
+        treeScanActive={treeScanActive}
+        treeScanDone={treeScanDone}
+        treeScanProgress={treeScanProgress}
       />
 
       <main className="flex-1 relative overflow-hidden">
