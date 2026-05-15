@@ -54,6 +54,39 @@ button {
   border-right-color: rgba(8, 20, 14, 0.96) !important;
 }
 
+/* PalmScan map styles */
+.map-container { width: 100%; height: 100%; }
+
+.panel-scroll { scrollbar-width: thin; scrollbar-color: #d1cec8 transparent; }
+.panel-scroll::-webkit-scrollbar { width: 4px; }
+.panel-scroll::-webkit-scrollbar-track { background: transparent; }
+.panel-scroll::-webkit-scrollbar-thumb { background: #d1cec8; border-radius: 2px; }
+
+@keyframes pulse-ring {
+  0%   { transform: scale(0.8); opacity: 1; }
+  80%  { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.sensor-pulse-ring { animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite; }
+
+@keyframes scan-progress { from { width: 0%; } to { width: 100%; } }
+
+@keyframes cta-ring {
+  0%   { box-shadow: 0 0 0 0   rgba(224,124,58,0.55); }
+  70%  { box-shadow: 0 0 0 8px rgba(224,124,58,0);    }
+  100% { box-shadow: 0 0 0 0   rgba(224,124,58,0);    }
+}
+.btn-cta-ring { animation: cta-ring 1.6s ease-out infinite; }
+
+/* Hide MapboxGL Draw built-in toolbar — we use custom buttons */
+.mapbox-gl-draw_ctrl-draw-btn { display: none !important; }
+.mapboxgl-ctrl-top-right .mapboxgl-ctrl-group { display: none !important; }
+.mapboxgl-ctrl-bottom-right .mapboxgl-ctrl-group { display: block !important; border-radius: 10px !important; box-shadow: 0 2px 12px rgba(0,0,0,0.25) !important; }
+
+.mapboxgl-popup-content { background: transparent !important; padding: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
+.mapboxgl-popup-tip { display: none !important; }
+.mapboxgl-ctrl-logo { opacity: 0.3; }
+
 @media print {
   body {
     background: #ffffff;
