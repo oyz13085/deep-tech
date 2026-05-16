@@ -1,5 +1,6 @@
 export type PageId =
   | 'scan'
+  | 'tls'
   | 'report';
 
 export type BlockStatus =

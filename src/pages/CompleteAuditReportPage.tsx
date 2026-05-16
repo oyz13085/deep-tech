@@ -309,7 +309,7 @@ export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPagePr
               </span>
               <div className="flex-1 min-w-0">
                 <h2 className="text-2xl font-black tracking-normal text-sentinel-text md:text-3xl">{section.title}</h2>
-                {'subtitle' in section && section.subtitle && (
+                {'subtitle' in section && typeof section.subtitle === 'string' && section.subtitle && (
                   <p className="mt-0.5 text-sm font-semibold text-sentinel-muted">{section.subtitle}</p>
                 )}
               </div>
