@@ -3,6 +3,4 @@ dist/
 .env.local
 vite-dev.log
 vite-dev.err
-.next/
-next-env.d.ts
 tsconfig.tsbuildinfo
