@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import {
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { PageId } from '../types';
 import { stages } from '../data/demoData';
+import { allBlockDrillData } from '../data/blockTreeData';
 import { ClassificationInfographic } from '../components/analysis/ClassificationInfographic';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -44,10 +45,10 @@ type EstateScanPageProps = {
 type PipelinePhase = 'idle' | 'tls' | 'model' | 'classify' | 'report' | 'done';
 
 const pipelineCards = [
-  { title: 'Targeted TLS Data',      subtitle: 'Combined captures from 4 scan stations',       icon: <ScanLine      className="h-8 w-8" /> },
-  { title: 'UM Deep-Learning IP',    subtitle: 'PI 2023003250 concept',                         icon: <BrainCircuit  className="h-8 w-8" /> },
-  { title: 'BSR Stage Classification', subtitle: 'Priority staging from TLS-derived canopy data', icon: <Target      className="h-8 w-8" /> },
-  { title: 'Dr. Palm Report',        subtitle: 'Actions, yield-at-risk, and audit output',      icon: <FileBarChart  className="h-8 w-8" /> },
+  { title: 'Targeted TLS Data',        subtitle: 'Combined captures from 4 scan stations',        icon: <ScanLine     className="h-8 w-8" /> },
+  { title: 'UM Deep-Learning IP',      subtitle: 'PI 2023003250 concept',                         icon: <BrainCircuit className="h-8 w-8" /> },
+  { title: 'BSR Stage Classification', subtitle: 'Priority staging from TLS-derived canopy data', icon: <Target       className="h-8 w-8" /> },
+  { title: 'Dr. Palm Report',          subtitle: 'Actions, yield-at-risk, and audit output',      icon: <FileBarChart className="h-8 w-8" /> },
 ];
 
 const modelStatuses: Record<PipelinePhase, string> = {
@@ -60,11 +61,13 @@ const modelStatuses: Record<PipelinePhase, string> = {
 };
 
 export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPageProps) {
-  const [scanComplete,     setScanComplete]     = useState(() => {
+  const [scanComplete, setScanComplete] = useState(() => {
     try { return localStorage.getItem('palmscan_scan_done') === 'true'; } catch { return false; }
   });
-  const [treeScanActive,   setTreeScanActive]   = useState(false);
-  const [treeScanDone,     setTreeScanDone]     = useState(() => {
+  const [fullTlsDone, setFullTlsDone] = useState(() => {
+    try { return localStorage.getItem('palmscan_fulltls_done') === 'true'; } catch { return false; }
+  });
+  const [treeScanDone, setTreeScanDone] = useState(() => {
     try {
       const raw = localStorage.getItem('palmscan_scan_results');
       if (!raw) return false;
@@ -72,6 +75,7 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
       return Object.values(data).some((c) => Object.keys(c).length > 0);
     } catch { return false; }
   });
+  const [treeScanActive,   setTreeScanActive]   = useState(false);
   const [treeScanProgress, setTreeScanProgress] = useState(0);
 
   useEffect(() => {
@@ -81,6 +85,29 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
     };
     window.addEventListener('palmscan:scan-update', handler);
     return () => window.removeEventListener('palmscan:scan-update', handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      setFullTlsDone(true);
+      try { localStorage.setItem('palmscan_fulltls_done', 'true'); } catch {}
+    };
+    window.addEventListener('palmscan:fullscan-complete', handler);
+    return () => window.removeEventListener('palmscan:fullscan-complete', handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      setFullTlsDone(false);
+      setScanComplete(false);
+      setTreeScanDone(false);
+      setTreeScanActive(false);
+      setTreeScanProgress(0);
+      setPipelinePhase('idle');
+      setLiveStages(stages.slice()); // reset to default demo stage counts
+    };
+    window.addEventListener('palmscan:reset', handler);
+    return () => window.removeEventListener('palmscan:reset', handler);
   }, []);
 
   useEffect(() => {
@@ -95,14 +122,25 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
     return () => window.removeEventListener('palmscan:treescan-update', handler);
   }, [onWorkflowComplete]);
 
-  const phase = useMemo<PipelinePhase>(() => {
-    if (treeScanDone)                             return 'done';
-    if (treeScanActive && treeScanProgress >= 66) return 'report';
-    if (treeScanActive && treeScanProgress >= 33) return 'classify';
-    if (treeScanActive)                           return 'model';
-    if (scanComplete)                             return 'tls';
-    return 'idle';
-  }, [scanComplete, treeScanActive, treeScanDone, treeScanProgress]);
+  // Pipeline phase is driven by the Full TLS Scan, not the tree scan
+  const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>(() => {
+    try { return localStorage.getItem('palmscan_fulltls_done') === 'true' ? 'done' : 'idle'; } catch { return 'idle'; }
+  });
+
+  useEffect(() => {
+    if (!fullTlsDone || pipelinePhase === 'done') return;
+    const timers = [
+      setTimeout(() => setPipelinePhase('tls'),      300),
+      setTimeout(() => setPipelinePhase('model'),   1500),
+      setTimeout(() => setPipelinePhase('classify'), 2700),
+      setTimeout(() => setPipelinePhase('report'),   3900),
+      setTimeout(() => setPipelinePhase('done'),     5100),
+    ];
+    return () => timers.forEach(clearTimeout);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullTlsDone]);
+
+  const phase = pipelinePhase;
 
   const activePipelineIndex = useMemo(() => {
     if (phase === 'idle' || phase === 'tls') return 0;
@@ -118,24 +156,38 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
     return Math.floor((treeScanProgress / 100) * stages.length);
   }, [treeScanActive, treeScanDone, treeScanProgress]);
 
-  const buildLiveStages = () => {
+  const buildLiveStages = useCallback(() => {
+    // Prefer live tree-scan counts from localStorage
     const live = readLiveCounts();
-    if (!live) return stages;
+    if (live) {
+      const countMap: Record<string, number> = {
+        stage0: live.healthy, stage1: live.mild, stage2: live.moderate, stage34: live.severe,
+      };
+      return stages.map((s) => ({ ...s, palms: countMap[s.key] ?? s.palms }));
+    }
+    // Fall back to estate totals aggregated from allBlockDrillData
+    const totals = Object.values(allBlockDrillData).reduce(
+      (acc, d) => ({
+        healthy:  acc.healthy  + d.stats.healthy,
+        mild:     acc.mild     + d.stats.mild,
+        moderate: acc.moderate + d.stats.moderate,
+        severe:   acc.severe   + d.stats.severe,
+      }),
+      { healthy: 0, mild: 0, moderate: 0, severe: 0 },
+    );
     const countMap: Record<string, number> = {
-      stage0: live.healthy,
-      stage1: live.mild,
-      stage2: live.moderate,
-      stage34: live.severe,
+      stage0: totals.healthy, stage1: totals.mild, stage2: totals.moderate, stage34: totals.severe,
     };
     return stages.map((s) => ({ ...s, palms: countMap[s.key] ?? s.palms }));
-  };
+  }, []);
 
   const [liveStages, setLiveStages] = useState(buildLiveStages);
-
   useEffect(() => {
     if (treeScanDone) setLiveStages(buildLiveStages());
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [treeScanDone]);
+  }, [treeScanDone, buildLiveStages]);
+  useEffect(() => {
+    if (fullTlsDone) setLiveStages(buildLiveStages());
+  }, [fullTlsDone, buildLiveStages]);
 
   const analysingActive = phase === 'model' || phase === 'classify';
   const packetsActive   = phase === 'tls' || analysingActive;
@@ -161,6 +213,7 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
 
       {/* ── Map + UM IP pipeline ────────────────────────────────────────── */}
       <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.15fr)_minmax(28rem,0.85fr)]">
+
         {/* Interactive map */}
         <div
           className="w-full overflow-hidden rounded-2xl border border-sentinel-border shadow-panel"
@@ -208,11 +261,15 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
             {analysingActive && <NeuralPulse />}
           </div>
         </div>
+
       </div>
 
-      {/* ── Classification infographic (appears as tree scan runs) ──────── */}
-      {visibleStageCount > 0 && (
-        <ClassificationInfographic stages={liveStages} visibleStageCount={visibleStageCount} />
+      {/* ── Classification infographic — full width, below map + pipeline ─ */}
+      {(fullTlsDone || visibleStageCount > 0) && (
+        <ClassificationInfographic
+          stages={liveStages}
+          visibleStageCount={visibleStageCount > 0 ? visibleStageCount : stages.length}
+        />
       )}
 
       {/* ── Context cards ───────────────────────────────────────────────── */}

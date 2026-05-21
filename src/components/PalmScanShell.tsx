@@ -27,10 +27,11 @@ function getFirstScannedCompartmentId(): string | null {
 const PalmScanMapView = lazy(() => import('./maps/PalmScanMapView'));
 
 type PalmScanShellProps = {
-  autoEnter?: boolean;
+  autoEnter?:        boolean;
+  hideScanControls?: boolean;
 };
 
-export default function PalmScanShell({ autoEnter = false }: PalmScanShellProps) {
+export default function PalmScanShell({ autoEnter = false, hideScanControls = false }: PalmScanShellProps) {
   const [drawnFields, setDrawnFields] = useState<DrawnField[]>(() => loadFromStorage());
   const [selectedId,  setSelectedId]  = useState<string | null>(null);
 
@@ -46,7 +47,7 @@ export default function PalmScanShell({ autoEnter = false }: PalmScanShellProps)
   }, []);
 
   return (
-    <div className="h-full w-full overflow-hidden" style={{ background: '#1a1f18' }}>
+    <div className="h-full w-full" style={{ background: '#1a1f18' }}>
       <Suspense fallback={
         <div className="flex h-full w-full items-center justify-center">
           <div className="text-center">
@@ -61,6 +62,7 @@ export default function PalmScanShell({ autoEnter = false }: PalmScanShellProps)
           onSelect={handleSelect}
           onFieldsChange={handleFieldsChange}
           defaultCompartmentId={defaultCompartmentId}
+          hideScanControls={hideScanControls}
         />
       </Suspense>
     </div>

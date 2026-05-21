@@ -5,7 +5,8 @@ export type PageId =
 
 export type BlockStatus =
   | 'No visible severe canopy anomaly'
-  | 'TLS confirmation required';
+  | 'TLS confirmation required'
+  | 'Early stage monitoring';
 
 export type BlockRecord = {
   id: number;

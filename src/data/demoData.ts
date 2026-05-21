@@ -25,23 +25,24 @@ export const progressLabels = [
 ];
 
 export const blocks: BlockRecord[] = [
-  { id: 1, name: 'Block 1', status: 'No visible severe canopy anomaly' },
-  { id: 2, name: 'Block 2', status: 'No visible severe canopy anomaly' },
-  { id: 3, name: 'Block 3', status: 'No visible severe canopy anomaly' },
-  { id: 4, name: 'Block 4', status: 'No visible severe canopy anomaly' },
-  { id: 5, name: 'Block 5', status: 'No visible severe canopy anomaly' },
-  { id: 6, name: 'Block 6', status: 'No visible severe canopy anomaly' },
-  { id: 7, name: 'Block 7', status: 'TLS confirmation required' },
-  { id: 8, name: 'Block 8', status: 'No visible severe canopy anomaly' },
-  { id: 9, name: 'Block 9', status: 'TLS confirmation required' },
-  { id: 10, name: 'Block 10', status: 'No visible severe canopy anomaly' },
-  { id: 11, name: 'Block 11', status: 'No visible severe canopy anomaly' },
-  { id: 12, name: 'Block 12', status: 'No visible severe canopy anomaly' },
+  { id: 1,  name: 'B1',  status: 'No visible severe canopy anomaly' },
+  { id: 2,  name: 'B2',  status: 'No visible severe canopy anomaly' },
+  { id: 3,  name: 'B3',  status: 'No visible severe canopy anomaly' },
+  { id: 4,  name: 'B4',  status: 'Early stage monitoring' },
+  { id: 5,  name: 'B5',  status: 'No visible severe canopy anomaly' },
+  { id: 6,  name: 'B6',  status: 'Early stage monitoring' },
+  { id: 7,  name: 'B7',  status: 'TLS confirmation required' },
+  { id: 8,  name: 'B8',  status: 'No visible severe canopy anomaly' },
+  { id: 9,  name: 'B9',  status: 'TLS confirmation required' },
+  { id: 10, name: 'B10', status: 'Early stage monitoring' },
+  { id: 11, name: 'B11', status: 'No visible severe canopy anomaly' },
+  { id: 12, name: 'B12', status: 'No visible severe canopy anomaly' },
 ];
 
 export const blockStatusColors = {
   'No visible severe canopy anomaly': '#2EAD5B',
-  'TLS confirmation required': '#EB5757',
+  'Early stage monitoring':           '#F2A93B',
+  'TLS confirmation required':        '#EB5757',
 } as const;
 
 export const neutralBlockColor = '#CFD8CD';

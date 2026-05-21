@@ -1,20 +1,28 @@
 
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import PolygonEditor, { DrawnField } from '../PolygonEditor';
 import CompartmentPopup from '../CompartmentPopup';
-import { ArrowLeft, ChevronRight, Circle, Download, MoreHorizontal, MousePointer2, Pencil, RotateCcw, Route, Scan, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronRight, Circle, Download, MoreHorizontal, MousePointer2, Pencil, RotateCcw, Route, Scan, Trash2, Upload, X } from 'lucide-react';
+import {
+  estateBounds,
+  buildBlockFeatureCollection,
+  buildBlockLabelFeatureCollection,
+  mapColors,
+} from '../../data/mapboxEstateData';
+import { allBlockDrillData } from '../../data/blockTreeData';
 
 interface Props {
-  drawnFields:         DrawnField[];
-  selectedId:          string | null;
-  onSelect:            (id: string) => void;
-  onFieldsChange:      (fields: DrawnField[]) => void;
+  drawnFields:           DrawnField[];
+  selectedId:            string | null;
+  onSelect:              (id: string) => void;
+  onFieldsChange:        (fields: DrawnField[]) => void;
   defaultCompartmentId?: string | null;
+  hideScanControls?:     boolean;
 }
 
 type LayerStyle = 'satellite' | 'topo' | 'slope' | 'ndvi';
@@ -29,6 +37,12 @@ type BlockProperties = {
 
 type AnnotationMode = 'select' | 'row' | 'palm';
 type PalmStatus = 'healthy' | 'mild' | 'moderate' | 'severe';
+
+type BlockPopupData = {
+  name: string;
+  status: string;
+  hectares: number;
+};
 
 type RowAnnotation = {
   id: string;
@@ -423,7 +437,11 @@ function buildLabelGeoJSON(fields: DrawnField[]): GeoJSON.FeatureCollection {
   };
 }
 
-export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange, defaultCompartmentId }: Props) {
+export function triggerDroneScan() {
+  window.dispatchEvent(new CustomEvent('palmscan:trigger-drone-scan'));
+}
+
+export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange, defaultCompartmentId, hideScanControls = false }: Props) {
   const containerRef     = useRef<HTMLDivElement>(null);
   const mapRef           = useRef<mapboxgl.Map | null>(null);
   const drawRef          = useRef<MapboxDraw | null>(null);
@@ -431,6 +449,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   const drawnFieldsRef      = useRef<DrawnField[]>(drawnFields);
   const scanIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const treeScanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const scanCompleteRef     = useRef(false);
   const activeCompartmentIdRef = useRef<string | null>(null);
   const activeBlockIdRef = useRef<string | null>(null);
   const annotationModeRef = useRef<AnnotationMode>('select');
@@ -462,6 +481,21 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   // viewingFieldId → CompartmentPopup open (read-only info)
   const [viewingFieldId, setViewingFieldId] = useState<string | null>(null);
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const [blockPopup, setBlockPopup] = useState<BlockPopupData | null>(null);
+  const [drillBlockId, setDrillBlockId] = useState<number | null>(null);
+  const drillBlockIdRef = useRef<number | null>(null);
+  const [tlsScanPhase, setTlsScanPhase] = useState<'idle' | 'scanning' | 'animating' | 'done'>('idle');
+  const [tlsScanProgress, setTlsScanProgress] = useState(0);
+  const tlsScanPhaseRef = useRef<'idle' | 'scanning' | 'animating' | 'done'>('idle');
+  const scannedBlocksRef = useRef<Set<number>>(new Set());
+  const tlsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [fullScanPhase, setFullScanPhase] = useState<'idle' | 'scanning' | 'done'>(() => {
+    try { return localStorage.getItem('palmscan_fulltls_done') === 'true' ? 'done' : 'idle'; } catch { return 'idle'; }
+  });
+  const [fullScanProgress, setFullScanProgress] = useState(0);
+
+  const fullScanPhaseRef = useRef<'idle' | 'scanning' | 'done'>('idle');
+  const fullScanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { drawnFieldsRef.current = drawnFields; }, [drawnFields]);
   useEffect(() => { activeCompartmentIdRef.current = activeCompartmentId; }, [activeCompartmentId]);
@@ -469,11 +503,44 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   useEffect(() => { annotationModeRef.current = annotationMode; }, [annotationMode]);
   useEffect(() => { palmStatusRef.current = palmStatus; }, [palmStatus]);
   useEffect(() => { rowStartRef.current = rowStart; }, [rowStart]);
+  useEffect(() => { drillBlockIdRef.current = drillBlockId; }, [drillBlockId]);
+  useEffect(() => { tlsScanPhaseRef.current = tlsScanPhase; }, [tlsScanPhase]);
+  useEffect(() => {
+    const data = drillBlockId !== null && tlsScanPhase === 'done' ? allBlockDrillData[drillBlockId] ?? null : null;
+    window.dispatchEvent(new CustomEvent('palmscan:block-drill-update', { detail: { blockId: drillBlockId, phase: tlsScanPhase, data } }));
+  }, [drillBlockId, tlsScanPhase]);
+  useEffect(() => { fullScanPhaseRef.current = fullScanPhase; }, [fullScanPhase]);
+
+  // ── Restore estate dots + scannedBlocksRef when map loads after a previous full TLS scan ──
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || fullScanPhase !== 'done') return;
+    // Pre-populate estate-dots source so drill-in shows cached dots instantly
+    const allFeatures = Object.values(allBlockDrillData).flatMap((d) => d.trees.features);
+    const estateSrc = map.getSource('estate-dots') as mapboxgl.GeoJSONSource | undefined;
+    if (estateSrc) estateSrc.setData({ type: 'FeatureCollection', features: allFeatures } as GeoJSON.GeoJSON);
+    // Layer stays hidden in estate view — dots only appear on block drill-in via tls-tree-dots
+    Object.keys(allBlockDrillData).forEach((id) => scannedBlocksRef.current.add(Number(id)));
+  }, [mapReady, fullScanPhase]);
+
+  // ── Restore revealed block colors after drone scan (persists to Page 2) ────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !scanComplete) return;
+    const blockSrc = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
+    const labelSrc = map.getSource('block-labels')       as mapboxgl.GeoJSONSource | undefined;
+    if (blockSrc) blockSrc.setData(buildBlockFeatureCollection(true));
+    if (labelSrc) labelSrc.setData(buildBlockLabelFeatureCollection(true));
+  }, [mapReady, scanComplete]);
+
   useEffect(() => { saveAnnotations(annotations); }, [annotations]);
   useEffect(() => {
+    scanCompleteRef.current = scanComplete;
     try { localStorage.setItem('palmscan_scan_done', String(scanComplete)); } catch {}
     window.dispatchEvent(new CustomEvent('palmscan:scan-update', { detail: { scanComplete, scanning } }));
   }, [scanComplete, scanning]);
+
+
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('palmscan:treescan-update', {
@@ -492,19 +559,6 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     if (lblSource)  lblSource.setData(buildLabelGeoJSON(drawnFields));
   }, [drawnFields, mapReady]);
 
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !mapReady) return;
-
-    const blocks = buildBlockGeoJSON(null);
-    const blockSource = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
-    const labelSource = map.getSource('block-labels') as mapboxgl.GeoJSONSource | undefined;
-    const rowSource = map.getSource('block-palm-rows') as mapboxgl.GeoJSONSource | undefined;
-
-    if (blockSource) blockSource.setData(blocks);
-    if (labelSource) labelSource.setData(buildBlockLabelGeoJSON(blocks));
-    if (rowSource) rowSource.setData(buildPalmRowGeoJSON(blocks));
-  }, [activeCompartmentId, drawnFields, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -582,6 +636,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
           : { type: 'FeatureCollection', features: [] }
       );
     }
+
   }, [scanComplete, drawnFields, mapReady, activeCompartmentId]);
 
   // ── Hide stress overlay when drilling into a compartment ─────────────────────
@@ -592,6 +647,48 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     if (map.getLayer('stress-fill'))    map.setLayoutProperty('stress-fill',    'visibility', vis);
     if (map.getLayer('stress-outline')) map.setLayoutProperty('stress-outline', 'visibility', vis);
   }, [activeCompartmentId, mapReady]);
+
+  // ── Block drill-down: zoom to block then run TLS scan sequence ───────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    // Always cancel any in-flight scan and reset panel state immediately
+    if (tlsIntervalRef.current) { clearInterval(tlsIntervalRef.current); tlsIntervalRef.current = null; }
+    setTlsScanPhase('idle');
+    setTlsScanProgress(0);
+    if (map.getLayer('tls-tree-dots')) map.setLayoutProperty('tls-tree-dots', 'visibility', 'none');
+    const prevDotsSrc = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
+    if (prevDotsSrc) prevDotsSrc.setData({ type: 'FeatureCollection', features: [] });
+    if (map.getLayer('tls-scan-line')) map.setLayoutProperty('tls-scan-line', 'visibility', 'none');
+
+    if (drillBlockId !== null) {
+      // Hide estate-wide dots while inside a single block
+      if (map.getLayer('estate-dots')) map.setLayoutProperty('estate-dots', 'visibility', 'none');
+      const data = allBlockDrillData[drillBlockId];
+      if (!data) return;
+      map.fitBounds(data.bounds, {
+        padding: { top: 80, bottom: 100, left: 80, right: 340 },
+        maxZoom: 17,
+        duration: 800,
+      });
+      // Wait for zoom to settle, then run TLS scan
+      const t = setTimeout(() => runTlsScanSequence(drillBlockId), 900);
+      return () => clearTimeout(t);
+    } else {
+      // Returning to estate view
+      if (!activeCompartmentIdRef.current) {
+        map.fitBounds(estateBounds, { padding: 40, duration: 800 });
+      }
+      // estate-dots intentionally kept hidden in estate view — dots only show on block drill-in
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drillBlockId, mapReady]);
+
+  // ── Exit drill mode if scan is reset ─────────────────────────────────────────
+  useEffect(() => {
+    if (!scanComplete) setDrillBlockId(null);
+  }, [scanComplete]);
 
 
   function addScanLayers(map: mapboxgl.Map) {
@@ -616,10 +713,8 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   function addBlockLayers(map: mapboxgl.Map) {
     if (map.getSource('compartment-blocks')) return;
 
-    const emptyBlocks = buildBlockGeoJSON(null);
-    map.addSource('compartment-blocks', { type: 'geojson', data: emptyBlocks });
-    map.addSource('block-labels', { type: 'geojson', data: buildBlockLabelGeoJSON(emptyBlocks) });
-    map.addSource('block-palm-rows', { type: 'geojson', data: buildPalmRowGeoJSON(emptyBlocks) });
+    map.addSource('compartment-blocks', { type: 'geojson', data: buildBlockFeatureCollection(false) });
+    map.addSource('block-labels',       { type: 'geojson', data: buildBlockLabelFeatureCollection(false) });
     map.addSource('user-row-lines', { type: 'geojson', data: buildUserRowGeoJSON({ rows: [], palms: [] }, new Set()) });
     map.addSource('user-palm-dots', { type: 'geojson', data: buildUserPalmGeoJSON({ rows: [], palms: [] }, new Set()) });
 
@@ -629,11 +724,10 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       source: 'compartment-blocks',
       paint: {
         'fill-color': ['match', ['get', 'status'],
-          'healthy',  BLOCK_COLORS.healthy,
-          'warning',  BLOCK_COLORS.warning,
-          'moderate', BLOCK_COLORS.moderate,
-          'severe',   BLOCK_COLORS.severe,
-          '#888',
+          'No visible severe canopy anomaly', mapColors.clear,
+          'Early stage monitoring',           mapColors.monitor,
+          'TLS confirmation required',        mapColors.flagged,
+          mapColors.neutral,
         ],
         'fill-opacity': 0.55,
       },
@@ -659,23 +753,11 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     });
 
     map.addLayer({
-      id: 'block-palm-rows',
-      type: 'line',
-      source: 'block-palm-rows',
-      paint: {
-        'line-color': '#d9f99d',
-        'line-width': 1,
-        'line-opacity': 0.42,
-        'line-dasharray': [3, 2],
-      },
-    });
-
-    map.addLayer({
       id: 'block-labels',
       type: 'symbol',
       source: 'block-labels',
       layout: {
-        'text-field': ['concat', ['get', 'id'], '\n', ['get', 'palmCount'], ' palms'],
+        'text-field': ['get', 'name'],
         'text-size': ['interpolate', ['linear'], ['zoom'], 14, 9, 17, 12],
         'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
         'text-line-height': 1.2,
@@ -716,6 +798,65 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       },
     });
 
+    // ── TLS scan sweep line (animates top→bottom during phase 1) ─────────
+    map.addSource('tls-scan-line', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'tls-scan-line',
+      type: 'line',
+      source: 'tls-scan-line',
+      layout: { visibility: 'none' },
+      paint: {
+        'line-color': '#34d399',
+        'line-width': 3,
+        'line-opacity': 1,
+        'line-blur': 1,
+      },
+    });
+
+    // ── TLS tree dots (per-block, animated row-by-row during phase 2) ────
+    map.addSource('tls-tree-dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'tls-tree-dots',
+      type: 'circle',
+      source: 'tls-tree-dots',
+      layout: { visibility: 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 1.2, 15, 2.5, 17, 4.5, 19, 7],
+        'circle-color': ['match', ['get', 'status'],
+          'healthy',  '#4ade80',
+          'mild',     '#fbbf24',
+          'moderate', '#f97316',
+          'severe',   '#ef4444',
+          '#ffffff',
+        ],
+        'circle-stroke-color': 'rgba(0,0,0,0.25)',
+        'circle-stroke-width': 0.6,
+        'circle-opacity': 0.85,
+      },
+    });
+
+    // ── Estate-wide dots (all 12 blocks, shown after full TLS scan) ───────
+    map.addSource('estate-dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'estate-dots',
+      type: 'circle',
+      source: 'estate-dots',
+      layout: { visibility: 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 1.0, 15, 2.0, 17, 3.5, 19, 6],
+        'circle-color': ['match', ['get', 'status'],
+          'healthy',  '#4ade80',
+          'mild',     '#fbbf24',
+          'moderate', '#f97316',
+          'severe',   '#ef4444',
+          '#ffffff',
+        ],
+        'circle-stroke-color': 'rgba(0,0,0,0.2)',
+        'circle-stroke-width': 0.5,
+        'circle-opacity': 0.8,
+      },
+    });
+
     map.on('mousemove', 'block-fill', () => {
       map.getCanvas().style.cursor = 'zoom-in';
     });
@@ -726,16 +867,28 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
 
     map.on('click', 'block-fill', (e) => {
       if (annotationModeRef.current !== 'select') return;
-      if (!activeCompartmentIdRef.current) return;
-      const blockId = e.features?.[0]?.properties?.id as string;
+      const props = e.features?.[0]?.properties as { id: string; name: string; status: string; hectares: number } | undefined;
       const geometry = e.features?.[0]?.geometry;
-      if (!blockId || !geometry || geometry.type !== 'Polygon') return;
+      if (!props || !geometry || geometry.type !== 'Polygon') return;
 
-      setActiveBlockId(blockId);
+      if (!activeCompartmentIdRef.current) {
+        // Any block after drone scan → TLS drill-down
+        if (scanCompleteRef.current) {
+          setBlockPopup(null);
+          setDrillBlockId(Number(props.id));
+          return;
+        }
+        // Estate view (pre-scan) — show info popup
+        setBlockPopup({ name: props.name, status: props.status, hectares: props.hectares });
+        return;
+      }
+
+      // Inside compartment — existing drill-in behaviour
+      setBlockPopup(null);
+      setActiveBlockId(props.id);
       setAnnotationMode('select');
       setRowStart(null);
-      map.setFilter('block-selected', ['==', ['get', 'id'], blockId]);
-
+      map.setFilter('block-selected', ['==', ['get', 'id'], props.id]);
       const coords = (geometry as GeoJSON.Polygon).coordinates[0] as [number, number][];
       const lngs = coords.map((c) => c[0]);
       const lats = coords.map((c) => c[1]);
@@ -743,6 +896,15 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         new mapboxgl.LngLatBounds([Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]),
         { padding: 120, maxZoom: 19, duration: 650 }
       );
+    });
+
+    // Click on empty map — close popup; exit drill mode if active
+    map.on('click', (e) => {
+      const hit = map.queryRenderedFeatures(e.point, { layers: ['block-fill'] });
+      if (hit.length === 0) {
+        setBlockPopup(null);
+        if (drillBlockIdRef.current !== null) setDrillBlockId(null);
+      }
     });
   }
 
@@ -857,8 +1019,8 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     const map = new mapboxgl.Map({
       container: containerRef.current,
       style: STYLE_URLS.satellite,
-      center: [103.272, 2.040],
-      zoom: 13.2,
+      center: [103.398736, 2.117582],
+      zoom: 14,
       maxZoom: 21,
     });
 
@@ -874,6 +1036,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     drawRef.current = draw;
 
     map.on('load', () => {
+      map.fitBounds(estateBounds, { padding: 40 });
       addCompartmentLayers(map, drawnFieldsRef.current);
       addBlockLayers(map);
       addScanLayers(map);
@@ -1020,20 +1183,26 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       addCompartmentLayers(map, drawnFieldsRef.current);
       addBlockLayers(map);
       addScanLayers(map);
-      const activeField = drawnFieldsRef.current.find((f) => f.id === activeCompartmentId) ?? null;
-      const blocks = buildBlockGeoJSON(null);
+      const revealed = scanCompleteRef.current;
       const blockSource = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
-      const labelSource = map.getSource('block-labels') as mapboxgl.GeoJSONSource | undefined;
-      const rowSource = map.getSource('block-palm-rows') as mapboxgl.GeoJSONSource | undefined;
-      if (blockSource) blockSource.setData(blocks);
-      if (labelSource) labelSource.setData(buildBlockLabelGeoJSON(blocks));
-      if (rowSource) rowSource.setData(buildPalmRowGeoJSON(blocks));
+      const labelSource = map.getSource('block-labels')       as mapboxgl.GeoJSONSource | undefined;
+      if (blockSource) blockSource.setData(buildBlockFeatureCollection(revealed));
+      if (labelSource) labelSource.setData(buildBlockLabelFeatureCollection(revealed));
       const visibleBlockIds = activeField ? new Set([activeField.id]) : new Set<string>();
       const userRowSource = map.getSource('user-row-lines') as mapboxgl.GeoJSONSource | undefined;
       const userPalmSource = map.getSource('user-palm-dots') as mapboxgl.GeoJSONSource | undefined;
       if (userRowSource) userRowSource.setData(buildUserRowGeoJSON(annotations, visibleBlockIds));
       if (userPalmSource) userPalmSource.setData(buildUserPalmGeoJSON(annotations, visibleBlockIds));
       if (map.getLayer('block-selected')) map.setFilter('block-selected', ['==', ['get', 'id'], activeBlockId ?? '']);
+      // Restore TLS dots if in drill mode and scan was complete
+      const drillId = drillBlockIdRef.current;
+      if (drillId !== null && allBlockDrillData[drillId] && tlsScanPhaseRef.current === 'done') {
+        const drillData = allBlockDrillData[drillId];
+        const dotsSrc = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
+        if (dotsSrc) dotsSrc.setData(drillData.trees as GeoJSON.GeoJSON);
+        if (map.getLayer('tls-tree-dots')) map.setLayoutProperty('tls-tree-dots', 'visibility', 'visible');
+      }
+      // estate-dots intentionally kept hidden — dots only show on block drill-in
     });
     map.setStyle(STYLE_URLS[activeLayer]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1108,6 +1277,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     // Clear persisted scan state
     try { localStorage.removeItem(SCAN_RESULTS_KEY); } catch {}
     try { localStorage.removeItem('palmscan_scan_done'); } catch {}
+    try { localStorage.removeItem('palmscan_fulltls_done'); } catch {}
 
     // Exit any compartment/draw view so the full toolbar is visible
     const draw = drawRef.current;
@@ -1127,6 +1297,29 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     setTreeScanActive(false);
     setTreeScanProgress(0);
     setScanning(false);
+    setDrillBlockId(null);
+    setTlsScanPhase('idle');
+    setTlsScanProgress(0);
+    scannedBlocksRef.current.clear();
+    if (tlsIntervalRef.current) { clearInterval(tlsIntervalRef.current); tlsIntervalRef.current = null; }
+    setFullScanPhase('idle');
+    setFullScanProgress(0);
+    if (fullScanIntervalRef.current) { clearInterval(fullScanIntervalRef.current); fullScanIntervalRef.current = null; }
+    const map = mapRef.current;
+    if (map) {
+      // Clear estate-wide dots
+      const estateSrc = map.getSource('estate-dots') as mapboxgl.GeoJSONSource | undefined;
+      if (estateSrc) estateSrc.setData({ type: 'FeatureCollection', features: [] });
+      if (map.getLayer('estate-dots')) map.setLayoutProperty('estate-dots', 'visibility', 'none');
+      // Reset block colors to neutral (pre-scan state)
+      const blockSrc = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
+      const labelSrc = map.getSource('block-labels')       as mapboxgl.GeoJSONSource | undefined;
+      if (blockSrc) blockSrc.setData(buildBlockFeatureCollection(false));
+      if (labelSrc) labelSrc.setData(buildBlockLabelFeatureCollection(false));
+    }
+
+    // Notify the rest of the app (EstateScanPage pipeline, infographic, etc.)
+    window.dispatchEvent(new CustomEvent('palmscan:reset'));
 
     // Fit map back to estate view
     const fields = drawnFieldsRef.current;
@@ -1415,21 +1608,160 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     }, 25);
   }, [treeScanActive, annotations.palms, annotations.rows]);
 
+  // ── Aggregate estate-wide tree stats ────────────────────────────────────────
+  const estateTotals = useMemo(() => {
+    const t = { total: 0, healthy: 0, mild: 0, moderate: 0, severe: 0 };
+    Object.values(allBlockDrillData).forEach((d) => {
+      t.total    += d.stats.total;
+      t.healthy  += d.stats.healthy;
+      t.mild     += d.stats.mild;
+      t.moderate += d.stats.moderate;
+      t.severe   += d.stats.severe;
+    });
+    return t;
+  }, []);
+
+  // ── Full estate TLS scan (all 12 blocks in parallel, estate view) ────────────
+  const handleFullEstateScan = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || fullScanPhaseRef.current === 'scanning') return;
+
+    setFullScanPhase('scanning');
+    setFullScanProgress(0);
+    const blockIds = Object.keys(allBlockDrillData).map(Number).sort((a, b) => a - b);
+    const totalPalms = blockIds.reduce((sum, id) => sum + allBlockDrillData[id].stats.total, 0);
+    let palmsScanned = 0;
+    let blockIdx = 0;
+    const accumulated: typeof allBlockDrillData[1]['trees']['features'] = [];
+
+    if (fullScanIntervalRef.current) clearInterval(fullScanIntervalRef.current);
+
+    // Each block "completes" every 420 ms → 12 blocks = ~5 s
+    fullScanIntervalRef.current = setInterval(() => {
+      if (blockIdx >= blockIds.length) {
+        clearInterval(fullScanIntervalRef.current!);
+        fullScanIntervalRef.current = null;
+
+        // Populate source so drill-in shows cached dots instantly; keep layer hidden in estate view
+        const estateSrc = map.getSource('estate-dots') as mapboxgl.GeoJSONSource | undefined;
+        if (estateSrc) estateSrc.setData({ type: 'FeatureCollection', features: accumulated } as GeoJSON.GeoJSON);
+
+        blockIds.forEach((id) => scannedBlocksRef.current.add(id));
+        setFullScanPhase('done');
+        setFullScanProgress(100);
+        try { localStorage.setItem('palmscan_fulltls_done', 'true'); } catch {}
+        window.dispatchEvent(new CustomEvent('palmscan:fullscan-complete'));
+        return;
+      }
+
+      const blockId = blockIds[blockIdx];
+      accumulated.push(...allBlockDrillData[blockId].trees.features);
+      palmsScanned += allBlockDrillData[blockId].stats.total;
+
+      const estateSrc = map.getSource('estate-dots') as mapboxgl.GeoJSONSource | undefined;
+      if (estateSrc) estateSrc.setData({ type: 'FeatureCollection', features: accumulated } as GeoJSON.GeoJSON);
+
+      setFullScanProgress(Math.round((palmsScanned / totalPalms) * 100));
+      blockIdx++;
+    }, 420);
+  }, []);
+
+  // ── TLS-IP scan sequence (phase 1: sweep line, phase 2: dot reveal) ─────────
+  const runTlsScanSequence = useCallback((blockId: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const data = allBlockDrillData[blockId];
+    if (!data) return;
+
+    // Cached result: show instantly
+    if (scannedBlocksRef.current.has(blockId)) {
+      setTlsScanPhase('done');
+      setTlsScanProgress(100);
+      const dotsSrc = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
+      if (dotsSrc) dotsSrc.setData(data.trees as GeoJSON.GeoJSON);
+      if (map.getLayer('tls-tree-dots')) map.setLayoutProperty('tls-tree-dots', 'visibility', 'visible');
+      return;
+    }
+
+    // Phase 1 — TLS sweep line (30 steps × 50 ms = 1.5 s)
+    setTlsScanPhase('scanning');
+    setTlsScanProgress(0);
+
+    const [[minLng, minLat], [maxLng, maxLat]] = data.bounds;
+    const SCAN_STEPS = 30;
+    let scanStep = 0;
+
+    if (tlsIntervalRef.current) clearInterval(tlsIntervalRef.current);
+    if (map.getLayer('tls-scan-line')) map.setLayoutProperty('tls-scan-line', 'visibility', 'visible');
+
+    tlsIntervalRef.current = setInterval(() => {
+      scanStep++;
+      const lat = maxLat - (maxLat - minLat) * (scanStep / SCAN_STEPS);
+      const scanLineSrc = map.getSource('tls-scan-line') as mapboxgl.GeoJSONSource | undefined;
+      if (scanLineSrc) {
+        scanLineSrc.setData({
+          type: 'FeatureCollection',
+          features: [{
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: [[minLng - 0.0002, lat], [maxLng + 0.0002, lat]] },
+          }],
+        });
+      }
+      setTlsScanProgress(Math.round((scanStep / SCAN_STEPS) * 50));
+
+      if (scanStep >= SCAN_STEPS) {
+        clearInterval(tlsIntervalRef.current!);
+        tlsIntervalRef.current = null;
+        if (map.getLayer('tls-scan-line')) map.setLayoutProperty('tls-scan-line', 'visibility', 'none');
+        const sl = map.getSource('tls-scan-line') as mapboxgl.GeoJSONSource | undefined;
+        if (sl) sl.setData({ type: 'FeatureCollection', features: [] });
+
+        // Phase 2 — animate dots top→bottom (40 steps × 50 ms = 2 s)
+        setTlsScanPhase('animating');
+        const allFeatures = [...data.trees.features].sort(
+          (a, b) => b.geometry.coordinates[1] - a.geometry.coordinates[1] || a.geometry.coordinates[0] - b.geometry.coordinates[0],
+        );
+        const ANIM_STEPS = 40;
+        const chunkSize = Math.max(1, Math.ceil(allFeatures.length / ANIM_STEPS));
+        let animStep = 0;
+        const revealed: typeof allFeatures = [];
+
+        if (map.getLayer('tls-tree-dots')) map.setLayoutProperty('tls-tree-dots', 'visibility', 'visible');
+
+        tlsIntervalRef.current = setInterval(() => {
+          animStep++;
+          const end = Math.min(animStep * chunkSize, allFeatures.length);
+          while (revealed.length < end) revealed.push(allFeatures[revealed.length]);
+
+          const dotsSrc = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
+          if (dotsSrc) dotsSrc.setData({ type: 'FeatureCollection', features: [...revealed] } as GeoJSON.GeoJSON);
+          setTlsScanProgress(50 + Math.round((animStep / ANIM_STEPS) * 50));
+
+          if (animStep >= ANIM_STEPS || revealed.length >= allFeatures.length) {
+            clearInterval(tlsIntervalRef.current!);
+            tlsIntervalRef.current = null;
+            const ds = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
+            if (ds) ds.setData(data.trees as GeoJSON.GeoJSON);
+            scannedBlocksRef.current.add(blockId);
+            setTlsScanPhase('done');
+            setTlsScanProgress(100);
+          }
+        }, 50);
+      }
+    }, 50);
+  }, []);
+
   // ── Drone scan ────────────────────────────────────────────────────────────────
   const handleDroneScan = useCallback(() => {
     const map = mapRef.current;
-    const fields = drawnFieldsRef.current;
-    if (!map || fields.length === 0 || scanning) return;
+    if (!map || scanning) return;
 
     setShowDroneScanPanel(false);
     setStressZones([]);
     setScanning(true);
 
-    const allCoords = fields.flatMap((f) => f.coordinates[0]);
-    const minLng = Math.min(...allCoords.map((c) => c[0]));
-    const maxLng = Math.max(...allCoords.map((c) => c[0]));
-    const minLat = Math.min(...allCoords.map((c) => c[1]));
-    const maxLat = Math.max(...allCoords.map((c) => c[1]));
+    const [[minLng, minLat], [maxLng, maxLat]] = estateBounds;
 
     // Zoom out to show the whole estate during scan
     map.fitBounds(
@@ -1473,18 +1805,27 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       if (step >= STEPS) {
         clearInterval(scanIntervalRef.current!);
         scanIntervalRef.current = null;
-        // Clear the swath line
-        const src = map.getSource('scan-swath') as mapboxgl.GeoJSONSource | undefined;
-        if (src) src.setData({ type: 'FeatureCollection', features: [] });
-        // Reveal stress overlay
-        const stressed = detectStressZones(fields);
-        setStressZones(stressed);
+        // Clear swath
+        const swathSrc2 = map.getSource('scan-swath') as mapboxgl.GeoJSONSource | undefined;
+        if (swathSrc2) swathSrc2.setData({ type: 'FeatureCollection', features: [] });
+        // Reveal real block statuses — B7 & B9 red, rest green
+        const revealed = buildBlockFeatureCollection(true);
+        const blockSrc = map.getSource('compartment-blocks') as mapboxgl.GeoJSONSource | undefined;
+        const labelSrc = map.getSource('block-labels')       as mapboxgl.GeoJSONSource | undefined;
+        if (blockSrc) blockSrc.setData(revealed);
+        if (labelSrc) labelSrc.setData(buildBlockLabelFeatureCollection(true));
         setScanning(false);
         setScanComplete(true);
         setShowDroneScanPanel(true);
       }
     }, 50);
   }, [scanning]);
+
+  useEffect(() => {
+    const handler = () => handleDroneScan();
+    window.addEventListener('palmscan:trigger-drone-scan', handler);
+    return () => window.removeEventListener('palmscan:trigger-drone-scan', handler);
+  }, [handleDroneScan]);
 
   const viewingField = drawnFields.find((f) => f.id === viewingFieldId) ?? null;
   const activeCompartment = drawnFields.find((f) => f.id === activeCompartmentId) ?? null;
@@ -1670,7 +2011,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       {/* Legend — estate view: binary; compartment view: severity */}
       <div className="absolute bottom-24 left-4 z-10 rounded-xl p-3"
         style={{ background: 'rgba(26,31,24,0.85)', backdropFilter: 'blur(8px)' }}>
-        {activeCompartmentId ? (
+        {activeCompartmentId || drillBlockId !== null ? (
           <>
             <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Tree Severity</p>
             {[
@@ -1687,14 +2028,18 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
           </>
         ) : (
           <>
-            <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Compartment</p>
+            <p className="text-[9px] text-gray-400 uppercase tracking-wider font-semibold mb-2">Block status</p>
             <div className="flex items-center gap-2 mb-1">
-              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#166534' }} />
-              <span className="text-xs text-gray-300">Safe</span>
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#2EAD5B' }} />
+              <span className="text-xs text-gray-300">Clear</span>
+            </div>
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#F2A93B' }} />
+              <span className="text-xs text-gray-300">Monitor</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#7f1d1d' }} />
-              <span className="text-xs text-gray-300">Dangerous</span>
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: '#EB5757' }} />
+              <span className="text-xs text-gray-300">Flagged</span>
             </div>
           </>
         )}
@@ -1739,19 +2084,167 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
         </div>
       )}
 
+      {/* ── Block info popup (estate view) ──────────────────────────────── */}
+      {blockPopup && !drawMode && !activeCompartmentId && (() => {
+        const flagged = blockPopup.status === 'TLS confirmation required';
+        const monitor = blockPopup.status === 'Early stage monitoring';
+        const clear   = blockPopup.status === 'No visible severe canopy anomaly';
+        const palmCount = Math.round(blockPopup.hectares * 136 / 10) * 10;
+        const badgeBg = flagged ? '#EB5757' : monitor ? '#F2A93B' : clear ? '#2EAD5B' : 'rgba(255,255,255,0.15)';
+        const badgeLabel = flagged ? 'Flagged' : monitor ? 'Monitor' : clear ? 'Clear' : 'Scanning';
+        const msgBg = flagged ? 'bg-red-50' : monitor ? 'bg-amber-50' : clear ? 'bg-green-50' : 'bg-gray-50';
+        const msgColor = flagged ? 'text-red-700' : monitor ? 'text-amber-700' : clear ? 'text-green-700' : 'text-gray-400';
+        const msg = flagged
+          ? 'Stage 1–2 BSR detected — treatment window open'
+          : monitor
+          ? 'Early stage indicators detected — continue monitoring'
+          : clear
+          ? 'No anomaly detected'
+          : 'Awaiting drone scan…';
+        return (
+          <div className="absolute top-20 right-4 z-10 w-72 rounded-2xl overflow-hidden shadow-2xl"
+            style={{ border: '1px solid rgba(255,255,255,0.12)' }}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3" style={{ background: '#1a3d2b' }}>
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-green-400">Estate Block</p>
+                <p className="text-xl font-black text-white">{blockPopup.name}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-lg text-xs font-bold text-white" style={{ background: badgeBg }}>
+                  {badgeLabel}
+                </span>
+                <button onClick={() => setBlockPopup(null)} className="text-green-400 hover:text-white transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            {/* Body */}
+            <div className="bg-white p-4 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-gray-50 px-3 py-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Area</p>
+                  <p className="text-sm font-black text-gray-900">{blockPopup.hectares} ha</p>
+                </div>
+                <div className="rounded-xl bg-gray-50 px-3 py-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Est. palms</p>
+                  <p className="text-sm font-black text-gray-900">~{palmCount}</p>
+                </div>
+              </div>
+              <div className={`rounded-xl px-3 py-2.5 ${msgBg}`}>
+                <p className={`text-xs font-bold leading-snug ${msgColor}`}>{msg}</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Block drill-down panel (visible only when TLS scan is done) ──── */}
+      {drillBlockId !== null && allBlockDrillData[drillBlockId] && tlsScanPhase === 'done' && (() => {
+        const dd = allBlockDrillData[drillBlockId];
+        const { stats } = dd;
+        const FLAGGED_IDS = new Set([7, 9]);
+        const MONITOR_IDS = new Set([4, 6, 10]);
+        const isFlagged = FLAGGED_IDS.has(drillBlockId);
+        const isMonitor = MONITOR_IDS.has(drillBlockId);
+        const badgeColor  = isFlagged ? '#EB5757' : isMonitor ? '#F2A93B' : '#2EAD5B';
+        const badgeLabel  = isFlagged ? 'TLS Flagged' : isMonitor ? 'Monitor' : 'Clear';
+        const warnBg      = isFlagged ? 'bg-red-50'   : isMonitor ? 'bg-amber-50' : 'bg-green-50';
+        const warnBorder  = isFlagged ? 'border-red-100' : isMonitor ? 'border-amber-100' : 'border-green-100';
+        const warnColor   = isFlagged ? 'text-red-700'   : isMonitor ? 'text-amber-700'   : 'text-green-700';
+        const warnMsg     = isFlagged
+          ? `⚠ BSR infection cluster detected — ${stats.severe} urgent palm${stats.severe !== 1 ? 's' : ''} require immediate ground confirmation`
+          : isMonitor
+          ? `Early stage indicators detected — ${stats.mild + stats.moderate} at-risk palms require monitoring`
+          : '✓ No BSR activity detected — continue routine monitoring schedule';
+        const severityRows = [
+          { key: 'severe',   label: 'Stage 3–4 Severe',   color: '#ef4444', count: stats.severe },
+          { key: 'moderate', label: 'Stage 2 Moderate',   color: '#f97316', count: stats.moderate },
+          { key: 'mild',     label: 'Stage 1 Mild',       color: '#fbbf24', count: stats.mild },
+          { key: 'healthy',  label: 'Stage 0 Healthy',    color: '#4ade80', count: stats.healthy },
+        ] as const;
+        return (
+          <div className="absolute top-16 right-4 z-20 rounded-2xl overflow-hidden shadow-2xl slide-in-right"
+            style={{ width: 300, border: '1px solid rgba(255,255,255,0.12)' }}>
+            {/* Header */}
+            <div className="px-4 py-3" style={{ background: '#1a2e1e' }}>
+              <div className="flex items-center justify-between mb-1">
+                <button
+                  onClick={() => setDrillBlockId(null)}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-green-400 hover:text-white transition-colors">
+                  <ArrowLeft className="w-3 h-3" /> Estate view
+                </button>
+                <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold text-white"
+                  style={{ background: badgeColor }}>
+                  {badgeLabel}
+                </span>
+              </div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-green-400 mt-1">
+                TLS-IP Scan Result
+              </p>
+              <p className="text-2xl font-black text-white">{dd.blockName}</p>
+              <p className="text-xs text-gray-400 mt-0.5">{dd.hectares} ha · {stats.total} palms classified</p>
+            </div>
+
+            {/* Stage breakdown */}
+            <div className="bg-white px-4 py-4 space-y-3">
+              {severityRows.map(({ key, label, color, count }) => {
+                const pct = stats.total ? Math.round((count / stats.total) * 100) : 0;
+                return (
+                  <div key={key}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-semibold text-gray-700">{label}</span>
+                      <span className="text-xs font-mono text-gray-500">{count} ({pct}%)</span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-gray-100">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Status message */}
+            <div className={`px-4 py-3 ${warnBg} border-t ${warnBorder}`}>
+              <p className={`text-xs font-bold leading-relaxed ${warnColor}`}>{warnMsg}</p>
+            </div>
+
+            {/* TLS scan complete badge */}
+            <div className="px-4 py-2.5 flex items-center gap-2"
+              style={{ background: 'rgba(6,78,59,0.08)', borderTop: '1px solid rgba(52,211,153,0.2)' }}>
+              <div className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+              <span className="text-xs font-semibold text-emerald-700">TLS-IP scan complete</span>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Bottom-centre: primary action dock ──────────────────────────── */}
-      {!drawMode && (
+      {!drawMode && !hideScanControls && (
         <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-2">
 
-          {/* Drone scan CTA — estate view, before scan */}
-          {!activeCompartmentId && drawnFields.length > 0 && !scanComplete && !scanning && (
-            <button
-              onClick={handleDroneScan}
-              className="btn-cta-ring flex items-center gap-2.5 px-6 py-3 rounded-2xl text-sm font-semibold text-white shadow-2xl transition-all hover:brightness-110"
-              style={{ background: '#e07c3a', border: '1.5px solid rgba(255,255,255,0.2)' }}>
-              <Scan className="w-4 h-4" />
-              ① Drone Scan Estate
-            </button>
+          {/* Grouped step buttons — estate view, not scanning */}
+          {!activeCompartmentId && !scanning && fullScanPhase !== 'scanning' && drillBlockId === null && (
+            <div className="flex items-center gap-1.5 px-1.5 py-1.5 rounded-2xl shadow-2xl"
+              style={{ background: 'rgba(22,28,20,0.95)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              {/* Step 1: Drone Scan */}
+              <button
+                onClick={!scanComplete ? handleDroneScan : undefined}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${!scanComplete ? 'btn-cta-ring hover:brightness-110' : 'cursor-default'}`}
+                style={{ background: scanComplete ? 'rgba(22,101,52,0.6)' : '#e07c3a', border: scanComplete ? '1px solid rgba(74,222,128,0.25)' : 'none' }}>
+                {scanComplete ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Scan className="w-4 h-4" />}
+                <span>{scanComplete ? '① Drone Done' : '① Drone Scan Estate'}</span>
+              </button>
+              <div className="w-px h-8 bg-white/10 flex-shrink-0" />
+              {/* Step 2: Full TLS Scan */}
+              <button
+                onClick={scanComplete && fullScanPhase === 'idle' ? handleFullEstateScan : undefined}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${!scanComplete ? 'opacity-40 cursor-not-allowed' : fullScanPhase === 'idle' ? 'btn-tls-ring hover:brightness-110' : 'cursor-default'}`}
+                style={{ background: !scanComplete ? '#0f1a12' : fullScanPhase === 'done' ? 'rgba(6,78,59,0.6)' : '#065f46', border: scanComplete && fullScanPhase !== 'done' ? '1px solid rgba(52,211,153,0.35)' : 'none' }}>
+                {fullScanPhase === 'done' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Scan className={`w-4 h-4 ${scanComplete ? 'text-emerald-300' : 'text-gray-600'}`} />}
+                <span>{fullScanPhase === 'done' ? '② TLS Done' : '② Full TLS Scan'}</span>
+              </button>
+            </div>
           )}
 
           {/* Drone scanning in progress */}
@@ -1768,6 +2261,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
             </div>
           )}
 
+
           {/* Drone scan done — prompt to enter compartment */}
           {!activeCompartmentId && scanComplete && !scanning && showDroneScanPanel && (
             <div className="flex items-center gap-3 px-4 py-2.5 rounded-2xl shadow-xl"
@@ -1782,8 +2276,22 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
                   </>
                 ) : (
                   <>
-                    <div className="w-2 h-2 rounded-full bg-green-400" />
-                    <span className="text-xs text-green-300 font-medium">All compartments healthy</span>
+                    <div className="flex gap-1.5 items-center">
+                      <span className="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" />
+                      <span className="text-xs font-semibold text-red-300">2 flagged</span>
+                    </div>
+                    <span className="text-gray-600 text-xs">·</span>
+                    <div className="flex gap-1.5 items-center">
+                      <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+                      <span className="text-xs font-semibold text-amber-300">3 monitoring</span>
+                    </div>
+                    <span className="text-gray-600 text-xs">·</span>
+                    <div className="flex gap-1.5 items-center">
+                      <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
+                      <span className="text-xs font-semibold text-green-300">7 clear</span>
+                    </div>
+                    <span className="text-gray-600 text-xs">·</span>
+                    <span className="text-xs font-semibold text-emerald-400">② Click any block → TLS-IP scan</span>
                   </>
                 )}
               </div>
@@ -1813,11 +2321,33 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
               <span className="text-xs font-semibold text-green-200">Tree scan complete</span>
             </div>
           )}
+
+          {/* TLS scanning in progress badge */}
+          {drillBlockId !== null && !activeCompartmentId && (tlsScanPhase === 'scanning' || tlsScanPhase === 'animating') && (
+            <div className="flex items-center gap-2 px-4 py-2 rounded-2xl shadow-lg"
+              style={{ background: 'rgba(6,78,59,0.9)', backdropFilter: 'blur(8px)', border: '1px solid rgba(52,211,153,0.3)' }}>
+              <Scan className="w-3.5 h-3.5 text-emerald-400 animate-pulse flex-shrink-0" />
+              <span className="text-xs font-semibold text-emerald-200">
+                {tlsScanPhase === 'scanning' ? 'TLS-IP scanning…' : 'Classifying palms…'} {allBlockDrillData[drillBlockId]?.blockName}
+              </span>
+            </div>
+          )}
+
+          {/* TLS scan complete badge */}
+          {drillBlockId !== null && !activeCompartmentId && tlsScanPhase === 'done' && (
+            <div className="flex items-center gap-2 px-4 py-2 rounded-2xl shadow-lg"
+              style={{ background: 'rgba(6,78,59,0.9)', backdropFilter: 'blur(8px)', border: '1px solid rgba(52,211,153,0.3)' }}>
+              <div className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span className="text-xs font-semibold text-emerald-200">
+                TLS-IP scan complete — {allBlockDrillData[drillBlockId]?.blockName}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Tree scan progress bar — full-width bottom strip ─────────────── */}
-      {treeScanActive && (
+      {/* ── Compartment tree-scan progress bar ──────────────────────────── */}
+      {treeScanActive && !hideScanControls && (
         <div className="absolute bottom-0 left-0 right-0 z-20 px-6 py-3 flex items-center gap-4"
           style={{ background: 'rgba(22,28,20,0.97)', backdropFilter: 'blur(12px)', borderTop: '1px solid rgba(56,189,248,0.25)' }}>
           <Scan className="w-4 h-4 text-sky-400 animate-pulse flex-shrink-0" />
@@ -1832,6 +2362,49 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
             </div>
           </div>
           <span className="text-[10px] text-gray-500 flex-shrink-0 font-mono">{activeCompartmentId}</span>
+        </div>
+      )}
+
+      {/* ── TLS-IP scan progress bar — full-width bottom strip ───────────── */}
+      {(tlsScanPhase === 'scanning' || tlsScanPhase === 'animating') && drillBlockId !== null && !hideScanControls && (
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-6 py-3 flex items-center gap-4"
+          style={{ background: 'rgba(6,18,14,0.97)', backdropFilter: 'blur(12px)', borderTop: '1px solid rgba(52,211,153,0.3)' }}>
+          <Scan className="w-4 h-4 text-emerald-400 animate-pulse flex-shrink-0" />
+          <div className="flex-1">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-semibold text-emerald-300">
+                {tlsScanPhase === 'scanning' ? 'TLS-IP deep scan — point cloud processing…' : 'Classifying palm health status…'}
+              </span>
+              <span className="text-[11px] font-mono text-emerald-400">{tlsScanProgress}%</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full rounded-full bg-emerald-400 transition-all duration-75"
+                style={{ width: `${tlsScanProgress}%` }} />
+            </div>
+          </div>
+          <span className="text-[10px] text-gray-500 flex-shrink-0 font-mono">{allBlockDrillData[drillBlockId]?.blockName}</span>
+        </div>
+      )}
+
+      {/* ── Full estate TLS scan progress bar ───────────────────────────── */}
+      {fullScanPhase === 'scanning' && !hideScanControls && (
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-6 py-3 flex items-center gap-4"
+          style={{ background: 'rgba(4,14,10,0.98)', backdropFilter: 'blur(12px)', borderTop: '2px solid rgba(52,211,153,0.4)' }}>
+          <Scan className="w-4 h-4 text-emerald-400 animate-pulse flex-shrink-0" />
+          <div className="flex-1">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-semibold text-emerald-300">
+                Full estate TLS-IP scan — {Math.round(fullScanProgress / 100 * 12)} of 12 blocks classified
+              </span>
+              <span className="text-[11px] font-mono text-emerald-400">
+                {Math.round(fullScanProgress / 100 * estateTotals.total).toLocaleString()} / {estateTotals.total.toLocaleString()} palms
+              </span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full rounded-full bg-emerald-400 transition-all duration-300"
+                style={{ width: `${fullScanProgress}%` }} />
+            </div>
+          </div>
         </div>
       )}
 

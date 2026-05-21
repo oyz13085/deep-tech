@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CalendarPlus, CheckCircle2, ChevronDown, Clock3, FileDown, Send } from 'lucide-react';
+import { CalendarPlus, CheckCircle2, ChevronDown, Clock3, Download, FileDown, Printer, Send } from 'lucide-react';
 import { estate } from '../data/demoData';
+import { allBlockDrillData } from '../data/blockTreeData';
 import PalmScanShell from '../components/PalmScanShell';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -12,37 +13,120 @@ type CompleteAuditReportPageProps = {
 
 type PalmStatus = 'healthy' | 'mild' | 'moderate' | 'severe';
 
-function readScanCounts(): { healthy: number; mild: number; moderate: number; severe: number } | null {
-  try {
-    const raw = localStorage.getItem('palmscan_scan_results');
-    if (!raw) return null;
-    const all = JSON.parse(raw) as Record<string, Record<string, string>>;
-    const counts = { healthy: 0, mild: 0, moderate: 0, severe: 0 };
-    Object.values(all).forEach((compartment) => {
-      Object.values(compartment).forEach((status) => {
-        if (status in counts) counts[status as PalmStatus]++;
-      });
-    });
-    const total = counts.healthy + counts.mild + counts.moderate + counts.severe;
-    return total > 0 ? counts : null;
-  } catch { return null; }
+type ScanCounts = { healthy: number; mild: number; moderate: number; severe: number };
+
+function computeEstateTotals(): ScanCounts {
+  return Object.values(allBlockDrillData).reduce(
+    (acc, d) => ({
+      healthy:  acc.healthy  + d.stats.healthy,
+      mild:     acc.mild     + d.stats.mild,
+      moderate: acc.moderate + d.stats.moderate,
+      severe:   acc.severe   + d.stats.severe,
+    }),
+    { healthy: 0, mild: 0, moderate: 0, severe: 0 },
+  );
 }
 
-const DEMO_COUNTS = { healthy: 53, mild: 87, moderate: 41, severe: 23 };
-const DEMO_YIELD  = 280000;
+function readScanCounts(): ScanCounts {
+  try {
+    const raw = localStorage.getItem('palmscan_scan_results');
+    if (raw) {
+      const all = JSON.parse(raw) as Record<string, Record<string, string>>;
+      const counts: ScanCounts = { healthy: 0, mild: 0, moderate: 0, severe: 0 };
+      Object.values(all).forEach((compartment) => {
+        Object.values(compartment).forEach((status) => {
+          if (status in counts) counts[status as PalmStatus]++;
+        });
+      });
+      if (counts.healthy + counts.mild + counts.moderate + counts.severe > 0) return counts;
+    }
+  } catch {}
+  // Fall back to estate totals from allBlockDrillData
+  return computeEstateTotals();
+}
+
+// RM per at-risk (severe + moderate) palm — derived from demo reference scenario
+const YIELD_PER_RISK_PALM = 4375;
+
+type SevereTreeRecord = {
+  blockId: number;
+  blockName: string;
+  treeNum: number;
+  row: number;
+  position: number;
+  lat: number;
+  lng: number;
+};
+
+const ROW_THRESHOLD = 0.00015; // ~16 m — groups trees on the same planting row
+
+function buildSevereTreeReport(): { blockName: string; trees: SevereTreeRecord[] }[] {
+  const result: { blockName: string; trees: SevereTreeRecord[] }[] = [];
+
+  Object.entries(allBlockDrillData).forEach(([idStr, data]) => {
+    const blockId = Number(idStr);
+    const severeTrees = data.trees.features.filter((f) => f.properties.status === 'severe');
+    if (severeTrees.length === 0) return;
+
+    // Sort north → south (lat desc), then west → east (lng asc) within each row
+    const sorted = [...severeTrees].sort((a, b) => {
+      const dy = b.geometry.coordinates[1] - a.geometry.coordinates[1];
+      if (Math.abs(dy) > 1e-9) return dy;
+      return a.geometry.coordinates[0] - b.geometry.coordinates[0];
+    });
+
+    let currentRow = 0;
+    let lastLat: number | null = null;
+    let posInRow = 0;
+    let treeNum = 0;
+
+    const records: SevereTreeRecord[] = sorted.map((feature) => {
+      const [lng, lat] = feature.geometry.coordinates;
+      if (lastLat === null || Math.abs(lat - lastLat) > ROW_THRESHOLD) {
+        currentRow++;
+        posInRow = 0;
+        lastLat = lat;
+      }
+      posInRow++;
+      treeNum++;
+      return { blockId, blockName: data.blockName, treeNum, row: currentRow, position: posInRow, lat, lng };
+    });
+
+    result.push({ blockName: data.blockName, trees: records });
+  });
+
+  result.sort((a, b) => a.blockName.localeCompare(b.blockName, undefined, { numeric: true }));
+  return result;
+}
+
+function downloadSevereTreeCSV(report: { blockName: string; trees: SevereTreeRecord[] }[]): void {
+  const header = 'Block,Tree #,Row,Position,Latitude,Longitude,Action';
+  const lines = [header];
+  report.forEach(({ blockName, trees }) => {
+    trees.forEach(({ treeNum, row, position, lat, lng }) => {
+      lines.push(`${blockName},${treeNum},${row},${position},${lat.toFixed(6)},${lng.toFixed(6)},Fell and replant`);
+    });
+  });
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'severe_trees_field_report.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 const formatCurrency = (value: number) => `RM${value.toLocaleString('en-MY')}`;
 
 export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPageProps) {
-  const scanCounts = useMemo(() => readScanCounts() ?? DEMO_COUNTS, []);
+  const scanCounts = useMemo(() => readScanCounts(), []);
 
-  const yieldAtRisk = useMemo(() => {
-    if (!readScanCounts()) return DEMO_YIELD;
-    // Scale from the demo baseline proportional to actual severe+moderate count
-    const demoRisk = DEMO_COUNTS.severe + DEMO_COUNTS.moderate;
-    const actualRisk = scanCounts.severe + scanCounts.moderate;
-    return Math.round((actualRisk / Math.max(demoRisk, 1)) * DEMO_YIELD);
-  }, [scanCounts]);
+  const yieldAtRisk = useMemo(
+    () => (scanCounts.severe + scanCounts.moderate) * YIELD_PER_RISK_PALM,
+    [scanCounts],
+  );
 
   const treatCount = scanCounts.mild + scanCounts.moderate;
 
@@ -249,7 +333,7 @@ export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPagePr
               </p>
               <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
                 <div className="overflow-hidden rounded-2xl border border-sentinel-border shadow-inner" style={{ height: 560 }}>
-                  <PalmScanShell autoEnter />
+                  <PalmScanShell autoEnter hideScanControls />
                 </div>
                 <div className="grid content-start gap-3">
                   {stageItems.map((item) => (
@@ -292,6 +376,12 @@ export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPagePr
               </div>
             </>
           ),
+        },
+        {
+          id: 'field-report',
+          eyebrow: '4',
+          title: 'Severe Tree Field Report',
+          content: <FieldReport />,
         },
       ].map((section) => {
         const isOpen = openSections.has(section.id);
@@ -390,6 +480,92 @@ function ComparisonBar({
       </div>
       <div className="text-xl font-black text-sentinel-deep md:text-right">{value}</div>
     </div>
+  );
+}
+
+function FieldReport() {
+  const report = useMemo(() => buildSevereTreeReport(), []);
+  const totalSevere = report.reduce((s, b) => s + b.trees.length, 0);
+
+  return (
+    <>
+      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-base font-semibold text-sentinel-muted">
+            {totalSevere} severe palm{totalSevere !== 1 ? 's' : ''} across{' '}
+            {report.length} compartment{report.length !== 1 ? 's' : ''} — hand this sheet to field workers for location and felling.
+          </p>
+        </div>
+        <div className="no-print flex shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={() => downloadSevereTreeCSV(report)}
+            className="flex items-center gap-2 rounded-xl border border-sentinel-border bg-white px-4 py-2 text-sm font-black text-sentinel-text shadow-soft transition hover:bg-sentinel-surface"
+          >
+            <Download className="h-4 w-4" />
+            Download CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="flex items-center gap-2 rounded-xl border border-sentinel-border bg-white px-4 py-2 text-sm font-black text-sentinel-text shadow-soft transition hover:bg-sentinel-surface"
+          >
+            <Printer className="h-4 w-4" />
+            Print
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-5">
+        {report.map(({ blockName, trees }) => (
+          <div key={blockName} className="overflow-hidden rounded-2xl border border-sentinel-border">
+            <div className="flex items-center gap-3 border-b border-sentinel-border bg-[#C0392B]/6 px-5 py-3">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[#C0392B] text-sm font-black text-white">
+                {blockName}
+              </span>
+              <div>
+                <span className="text-base font-black text-sentinel-text">Compartment {blockName}</span>
+                <span className="ml-3 text-sm font-semibold text-sentinel-muted">{trees.length} severe palm{trees.length !== 1 ? 's' : ''} — fell and replant</span>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[36rem] text-sm">
+                <thead>
+                  <tr className="border-b border-sentinel-border bg-sentinel-surface">
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Tree #</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Row</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Position</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Latitude</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Longitude</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trees.map((tree) => (
+                    <tr key={`${tree.blockName}-${tree.treeNum}`} className="border-b border-sentinel-border/60 bg-white transition hover:bg-sentinel-surface/50">
+                      <td className="px-4 py-2.5 font-black text-sentinel-text">#{tree.treeNum}</td>
+                      <td className="px-4 py-2.5 font-semibold text-sentinel-muted">R{tree.row}</td>
+                      <td className="px-4 py-2.5 font-semibold text-sentinel-muted">P{tree.position}</td>
+                      <td className="px-4 py-2.5 font-mono text-sentinel-text">{tree.lat.toFixed(6)}</td>
+                      <td className="px-4 py-2.5 font-mono text-sentinel-text">{tree.lng.toFixed(6)}</td>
+                      <td className="px-4 py-2.5">
+                        <span className="rounded-full bg-[#C0392B]/10 px-3 py-1 text-xs font-black text-[#C0392B]">
+                          Fell &amp; replant
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-4 text-xs font-bold leading-relaxed text-sentinel-muted">
+        GPS coordinates derived from TLS scan. Row (R) and position (P) assigned north-to-south, west-to-east within each compartment. Verify on-site before felling.
+      </p>
+    </>
   );
 }
 
