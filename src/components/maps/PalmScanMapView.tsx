@@ -1188,7 +1188,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
       const labelSource = map.getSource('block-labels')       as mapboxgl.GeoJSONSource | undefined;
       if (blockSource) blockSource.setData(buildBlockFeatureCollection(revealed));
       if (labelSource) labelSource.setData(buildBlockLabelFeatureCollection(revealed));
-      const visibleBlockIds = activeField ? new Set([activeField.id]) : new Set<string>();
+      const visibleBlockIds = activeCompartmentId ? new Set([activeCompartmentId]) : new Set<string>();
       const userRowSource = map.getSource('user-row-lines') as mapboxgl.GeoJSONSource | undefined;
       const userPalmSource = map.getSource('user-palm-dots') as mapboxgl.GeoJSONSource | undefined;
       if (userRowSource) userRowSource.setData(buildUserRowGeoJSON(annotations, visibleBlockIds));
