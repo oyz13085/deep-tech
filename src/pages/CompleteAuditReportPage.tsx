@@ -13,42 +13,7 @@ type CompleteAuditReportPageProps = {
 
 type PalmStatus = 'healthy' | 'mild' | 'moderate' | 'severe';
 
-type ScanCounts = { healthy: number; mild: number; moderate: number; severe: number };
-
-function computeEstateTotals(): ScanCounts {
-  return Object.values(allBlockDrillData).reduce(
-    (acc, d) => ({
-      healthy:  acc.healthy  + d.stats.healthy,
-      mild:     acc.mild     + d.stats.mild,
-      moderate: acc.moderate + d.stats.moderate,
-      severe:   acc.severe   + d.stats.severe,
-    }),
-    { healthy: 0, mild: 0, moderate: 0, severe: 0 },
-  );
-}
-
-function readScanCounts(): ScanCounts {
-  try {
-    const raw = localStorage.getItem('palmscan_scan_results');
-    if (raw) {
-      const all = JSON.parse(raw) as Record<string, Record<string, string>>;
-      const counts: ScanCounts = { healthy: 0, mild: 0, moderate: 0, severe: 0 };
-      Object.values(all).forEach((compartment) => {
-        Object.values(compartment).forEach((status) => {
-          if (status in counts) counts[status as PalmStatus]++;
-        });
-      });
-      if (counts.healthy + counts.mild + counts.moderate + counts.severe > 0) return counts;
-    }
-  } catch {}
-  // Fall back to estate totals from allBlockDrillData
-  return computeEstateTotals();
-}
-
-// RM per at-risk (severe + moderate) palm — derived from demo reference scenario
-const YIELD_PER_RISK_PALM = 4375;
-
-type SevereTreeRecord = {
+type TreeRecord = {
   blockId: number;
   blockName: string;
   treeNum: number;
@@ -56,20 +21,23 @@ type SevereTreeRecord = {
   position: number;
   lat: number;
   lng: number;
+  status: 'severe' | 'moderate' | 'mild';
 };
 
-const ROW_THRESHOLD = 0.00015; // ~16 m — groups trees on the same planting row
+const ROW_THRESHOLD = 0.00015;
 
-function buildSevereTreeReport(): { blockName: string; trees: SevereTreeRecord[] }[] {
-  const result: { blockName: string; trees: SevereTreeRecord[] }[] = [];
+function buildFieldReport(): { blockName: string; trees: TreeRecord[] }[] {
+  const result: { blockName: string; trees: TreeRecord[] }[] = [];
 
-  Object.entries(allBlockDrillData).forEach(([idStr, data]) => {
+  // Audit report is scoped to Block 7 only
+  Object.entries(allBlockDrillData).filter(([idStr]) => Number(idStr) === 7).forEach(([idStr, data]) => {
     const blockId = Number(idStr);
-    const severeTrees = data.trees.features.filter((f) => f.properties.status === 'severe');
-    if (severeTrees.length === 0) return;
+    const atRiskTrees = data.trees.features.filter(
+      (f) => f.properties.status === 'severe' || f.properties.status === 'moderate' || f.properties.status === 'mild',
+    );
+    if (atRiskTrees.length === 0) return;
 
-    // Sort north → south (lat desc), then west → east (lng asc) within each row
-    const sorted = [...severeTrees].sort((a, b) => {
+    const sorted = [...atRiskTrees].sort((a, b) => {
       const dy = b.geometry.coordinates[1] - a.geometry.coordinates[1];
       if (Math.abs(dy) > 1e-9) return dy;
       return a.geometry.coordinates[0] - b.geometry.coordinates[0];
@@ -80,7 +48,7 @@ function buildSevereTreeReport(): { blockName: string; trees: SevereTreeRecord[]
     let posInRow = 0;
     let treeNum = 0;
 
-    const records: SevereTreeRecord[] = sorted.map((feature) => {
+    const records: TreeRecord[] = sorted.map((feature) => {
       const [lng, lat] = feature.geometry.coordinates;
       if (lastLat === null || Math.abs(lat - lastLat) > ROW_THRESHOLD) {
         currentRow++;
@@ -89,7 +57,16 @@ function buildSevereTreeReport(): { blockName: string; trees: SevereTreeRecord[]
       }
       posInRow++;
       treeNum++;
-      return { blockId, blockName: data.blockName, treeNum, row: currentRow, position: posInRow, lat, lng };
+      return {
+        blockId,
+        blockName: data.blockName,
+        treeNum,
+        row: currentRow,
+        position: posInRow,
+        lat,
+        lng,
+        status: feature.properties.status as 'severe' | 'moderate' | 'mild',
+      };
     });
 
     result.push({ blockName: data.blockName, trees: records });
@@ -99,12 +76,14 @@ function buildSevereTreeReport(): { blockName: string; trees: SevereTreeRecord[]
   return result;
 }
 
-function downloadSevereTreeCSV(report: { blockName: string; trees: SevereTreeRecord[] }[]): void {
-  const header = 'Block,Tree #,Row,Position,Latitude,Longitude,Action';
+function downloadFieldReportCSV(report: { blockName: string; trees: TreeRecord[] }[]): void {
+  const header = 'Block,Tree #,Row,Position,Latitude,Longitude,Status,Action';
   const lines = [header];
   report.forEach(({ blockName, trees }) => {
-    trees.forEach(({ treeNum, row, position, lat, lng }) => {
-      lines.push(`${blockName},${treeNum},${row},${position},${lat.toFixed(6)},${lng.toFixed(6)},Fell and replant`);
+    trees.forEach(({ treeNum, row, position, lat, lng, status }) => {
+      const stageLabel = status === 'severe' ? 'Stage 3-4' : status === 'moderate' ? 'Stage 2' : 'Stage 1';
+      const action = status === 'severe' ? 'Fell and replant' : status === 'moderate' ? 'Apply treatment' : 'Monitor / Rescan in 30 days';
+      lines.push(`${blockName},${treeNum},${row},${position},${lat.toFixed(6)},${lng.toFixed(6)},${stageLabel},${action}`);
     });
   });
   const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
@@ -118,10 +97,13 @@ function downloadSevereTreeCSV(report: { blockName: string; trees: SevereTreeRec
   URL.revokeObjectURL(url);
 }
 
+
+const YIELD_PER_RISK_PALM = 4375;
+
 const formatCurrency = (value: number) => `RM${value.toLocaleString('en-MY')}`;
 
 export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPageProps) {
-  const scanCounts = useMemo(() => readScanCounts(), []);
+  const scanCounts = useMemo(() => allBlockDrillData[7].stats, []);
 
   const yieldAtRisk = useMemo(
     () => (scanCounts.severe + scanCounts.moderate) * YIELD_PER_RISK_PALM,
@@ -333,7 +315,7 @@ export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPagePr
               </p>
               <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
                 <div className="overflow-hidden rounded-2xl border border-sentinel-border shadow-inner" style={{ height: 560 }}>
-                  <PalmScanShell autoEnter hideScanControls />
+                  <PalmScanShell hideScanControls defaultDrillBlockId={7} />
                 </div>
                 <div className="grid content-start gap-3">
                   {stageItems.map((item) => (
@@ -374,14 +356,12 @@ export function CompleteAuditReportPage({ showToast }: CompleteAuditReportPagePr
                   AI-assisted. Agronomist confirmation recommended before felling.
                 </p>
               </div>
+              <div className="mt-6">
+                <h3 className="mb-4 text-xl font-black text-sentinel-text">Severe Tree Field Report</h3>
+                <FieldReport />
+              </div>
             </>
           ),
-        },
-        {
-          id: 'field-report',
-          eyebrow: '4',
-          title: 'Severe Tree Field Report',
-          content: <FieldReport />,
         },
       ].map((section) => {
         const isOpen = openSections.has(section.id);
@@ -484,22 +464,32 @@ function ComparisonBar({
 }
 
 function FieldReport() {
-  const report = useMemo(() => buildSevereTreeReport(), []);
-  const totalSevere = report.reduce((s, b) => s + b.trees.length, 0);
+  const report = useMemo(() => buildFieldReport(), []);
+  const totalStage34 = report.reduce((s, b) => s + b.trees.filter((t) => t.status === 'severe').length, 0);
+  const totalStage2  = report.reduce((s, b) => s + b.trees.filter((t) => t.status === 'moderate').length, 0);
+  const totalStage1  = report.reduce((s, b) => s + b.trees.filter((t) => t.status === 'mild').length, 0);
 
   return (
     <>
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-base font-semibold text-sentinel-muted">
-            {totalSevere} severe palm{totalSevere !== 1 ? 's' : ''} across{' '}
-            {report.length} compartment{report.length !== 1 ? 's' : ''} — hand this sheet to field workers for location and felling.
-          </p>
+        <div className="flex flex-wrap gap-3">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#C0392B]/10 px-3 py-1 text-sm font-black text-[#C0392B]">
+            <span className="h-2 w-2 rounded-full bg-[#C0392B]" />
+            {totalStage34} Stage 3-4 — fell &amp; replant
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#C96B1A]/10 px-3 py-1 text-sm font-black text-[#C96B1A]">
+            <span className="h-2 w-2 rounded-full bg-[#C96B1A]" />
+            {totalStage2} Stage 2 — apply treatment
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#F2C94C]/20 px-3 py-1 text-sm font-black text-[#B8940A]">
+            <span className="h-2 w-2 rounded-full bg-[#F2C94C]" />
+            {totalStage1} Stage 1 — monitor
+          </span>
         </div>
         <div className="no-print flex shrink-0 gap-2">
           <button
             type="button"
-            onClick={() => downloadSevereTreeCSV(report)}
+            onClick={() => downloadFieldReportCSV(report)}
             className="flex items-center gap-2 rounded-xl border border-sentinel-border bg-white px-4 py-2 text-sm font-black text-sentinel-text shadow-soft transition hover:bg-sentinel-surface"
           >
             <Download className="h-4 w-4" />
@@ -525,11 +515,15 @@ function FieldReport() {
               </span>
               <div>
                 <span className="text-base font-black text-sentinel-text">Compartment {blockName}</span>
-                <span className="ml-3 text-sm font-semibold text-sentinel-muted">{trees.length} severe palm{trees.length !== 1 ? 's' : ''} — fell and replant</span>
+                <span className="ml-3 text-sm font-semibold text-sentinel-muted">
+                  {trees.filter((t) => t.status === 'severe').length} Stage 3-4 ·{' '}
+                  {trees.filter((t) => t.status === 'moderate').length} Stage 2 ·{' '}
+                  {trees.filter((t) => t.status === 'mild').length} Stage 1
+                </span>
               </div>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[36rem] text-sm">
+              <table className="w-full min-w-[40rem] text-sm">
                 <thead>
                   <tr className="border-b border-sentinel-border bg-sentinel-surface">
                     <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Tree #</th>
@@ -537,21 +531,53 @@ function FieldReport() {
                     <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Position</th>
                     <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Latitude</th>
                     <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Longitude</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Status</th>
                     <th className="px-4 py-2.5 text-left text-xs font-black uppercase tracking-[0.1em] text-sentinel-muted">Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {trees.map((tree) => (
-                    <tr key={`${tree.blockName}-${tree.treeNum}`} className="border-b border-sentinel-border/60 bg-white transition hover:bg-sentinel-surface/50">
+                    <tr
+                      key={`${tree.blockName}-${tree.treeNum}`}
+                      className="border-b border-sentinel-border/60 bg-white transition hover:bg-sentinel-surface/50"
+                    >
                       <td className="px-4 py-2.5 font-black text-sentinel-text">#{tree.treeNum}</td>
                       <td className="px-4 py-2.5 font-semibold text-sentinel-muted">R{tree.row}</td>
                       <td className="px-4 py-2.5 font-semibold text-sentinel-muted">P{tree.position}</td>
                       <td className="px-4 py-2.5 font-mono text-sentinel-text">{tree.lat.toFixed(6)}</td>
                       <td className="px-4 py-2.5 font-mono text-sentinel-text">{tree.lng.toFixed(6)}</td>
                       <td className="px-4 py-2.5">
-                        <span className="rounded-full bg-[#C0392B]/10 px-3 py-1 text-xs font-black text-[#C0392B]">
-                          Fell &amp; replant
-                        </span>
+                        {tree.status === 'severe' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#C0392B]/10 px-2.5 py-0.5 text-xs font-black text-[#C0392B]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#C0392B]" />
+                            Stage 3-4
+                          </span>
+                        ) : tree.status === 'moderate' ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#C96B1A]/10 px-2.5 py-0.5 text-xs font-black text-[#C96B1A]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#C96B1A]" />
+                            Stage 2
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#F2C94C]/20 px-2.5 py-0.5 text-xs font-black text-[#B8940A]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#F2C94C]" />
+                            Stage 1
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {tree.status === 'severe' ? (
+                          <span className="rounded-full bg-[#C0392B]/10 px-3 py-1 text-xs font-black text-[#C0392B]">
+                            Fell &amp; replant
+                          </span>
+                        ) : tree.status === 'moderate' ? (
+                          <span className="rounded-full bg-[#C96B1A]/10 px-3 py-1 text-xs font-black text-[#C96B1A]">
+                            Apply treatment
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-[#F2C94C]/20 px-3 py-1 text-xs font-black text-[#B8940A]">
+                            Monitor / Rescan
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}

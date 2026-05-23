@@ -122,23 +122,42 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
     return () => window.removeEventListener('palmscan:treescan-update', handler);
   }, [onWorkflowComplete]);
 
-  // Pipeline phase is driven by the Full TLS Scan, not the tree scan
-  const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>(() => {
-    try { return localStorage.getItem('palmscan_fulltls_done') === 'true' ? 'done' : 'idle'; } catch { return 'idle'; }
-  });
+  // Pipeline + infographic driven by the per-block TLS drill scan
+  const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>('idle');
 
   useEffect(() => {
-    if (!fullTlsDone || pipelinePhase === 'done') return;
-    const timers = [
-      setTimeout(() => setPipelinePhase('tls'),      300),
-      setTimeout(() => setPipelinePhase('model'),   1500),
-      setTimeout(() => setPipelinePhase('classify'), 2700),
-      setTimeout(() => setPipelinePhase('report'),   3900),
-      setTimeout(() => setPipelinePhase('done'),     5100),
-    ];
-    return () => timers.forEach(clearTimeout);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fullTlsDone]);
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ blockId: number | null; phase: string }>;
+      const { phase } = ce.detail;
+      if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+
+      if (phase === 'scanning') {
+        setTreeScanActive(true);
+        setTreeScanProgress(100);
+        setPipelinePhase('tls');
+        pendingTimer = setTimeout(() => setPipelinePhase('model'), 700);
+      } else if (phase === 'animating') {
+        setTreeScanActive(true);
+        setTreeScanProgress(100);
+        setPipelinePhase('classify');
+        pendingTimer = setTimeout(() => setPipelinePhase('report'), 800);
+      } else if (phase === 'done') {
+        setTreeScanActive(false);
+        setTreeScanDone(true);
+        setTreeScanProgress(100);
+        setPipelinePhase('done');
+        onWorkflowComplete();
+      }
+    };
+
+    window.addEventListener('palmscan:block-drill-update', handler);
+    return () => {
+      window.removeEventListener('palmscan:block-drill-update', handler);
+      if (pendingTimer) clearTimeout(pendingTimer);
+    };
+  }, [onWorkflowComplete]);
 
   const phase = pipelinePhase;
 
@@ -165,18 +184,10 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
       };
       return stages.map((s) => ({ ...s, palms: countMap[s.key] ?? s.palms }));
     }
-    // Fall back to estate totals aggregated from allBlockDrillData
-    const totals = Object.values(allBlockDrillData).reduce(
-      (acc, d) => ({
-        healthy:  acc.healthy  + d.stats.healthy,
-        mild:     acc.mild     + d.stats.mild,
-        moderate: acc.moderate + d.stats.moderate,
-        severe:   acc.severe   + d.stats.severe,
-      }),
-      { healthy: 0, mild: 0, moderate: 0, severe: 0 },
-    );
+    // Fall back to Block 7 data (only block being scanned)
+    const b7 = allBlockDrillData[7].stats;
     const countMap: Record<string, number> = {
-      stage0: totals.healthy, stage1: totals.mild, stage2: totals.moderate, stage34: totals.severe,
+      stage0: b7.healthy, stage1: b7.mild, stage2: b7.moderate, stage34: b7.severe,
     };
     return stages.map((s) => ({ ...s, palms: countMap[s.key] ?? s.palms }));
   }, []);
@@ -185,9 +196,6 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
   useEffect(() => {
     if (treeScanDone) setLiveStages(buildLiveStages());
   }, [treeScanDone, buildLiveStages]);
-  useEffect(() => {
-    if (fullTlsDone) setLiveStages(buildLiveStages());
-  }, [fullTlsDone, buildLiveStages]);
 
   const analysingActive = phase === 'model' || phase === 'classify';
   const packetsActive   = phase === 'tls' || analysingActive;
@@ -265,10 +273,10 @@ export function EstateScanPage({ onNavigate, onWorkflowComplete }: EstateScanPag
       </div>
 
       {/* ── Classification infographic — full width, below map + pipeline ─ */}
-      {(fullTlsDone || visibleStageCount > 0) && (
+      {visibleStageCount > 0 && (
         <ClassificationInfographic
           stages={liveStages}
-          visibleStageCount={visibleStageCount > 0 ? visibleStageCount : stages.length}
+          visibleStageCount={visibleStageCount}
         />
       )}
 

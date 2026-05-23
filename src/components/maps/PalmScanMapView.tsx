@@ -23,6 +23,7 @@ interface Props {
   onFieldsChange:        (fields: DrawnField[]) => void;
   defaultCompartmentId?: string | null;
   hideScanControls?:     boolean;
+  defaultDrillBlockId?:  number;
 }
 
 type LayerStyle = 'satellite' | 'topo' | 'slope' | 'ndvi';
@@ -441,7 +442,7 @@ export function triggerDroneScan() {
   window.dispatchEvent(new CustomEvent('palmscan:trigger-drone-scan'));
 }
 
-export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange, defaultCompartmentId, hideScanControls = false }: Props) {
+export default function MapView({ drawnFields, selectedId, onSelect, onFieldsChange, defaultCompartmentId, hideScanControls = false, defaultDrillBlockId }: Props) {
   const containerRef     = useRef<HTMLDivElement>(null);
   const mapRef           = useRef<mapboxgl.Map | null>(null);
   const drawRef          = useRef<MapboxDraw | null>(null);
@@ -449,7 +450,8 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   const drawnFieldsRef      = useRef<DrawnField[]>(drawnFields);
   const scanIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const treeScanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const scanCompleteRef     = useRef(false);
+  const scanCompleteRef        = useRef(false);
+  const defaultDrillAppliedRef = useRef(false);
   const activeCompartmentIdRef = useRef<string | null>(null);
   const activeBlockIdRef = useRef<string | null>(null);
   const annotationModeRef = useRef<AnnotationMode>('select');
@@ -504,6 +506,45 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
   useEffect(() => { palmStatusRef.current = palmStatus; }, [palmStatus]);
   useEffect(() => { rowStartRef.current = rowStart; }, [rowStart]);
   useEffect(() => { drillBlockIdRef.current = drillBlockId; }, [drillBlockId]);
+
+  // ── Persist drillBlockId to localStorage so the map state survives navigation ─
+  useEffect(() => {
+    try {
+      if (drillBlockId !== null) localStorage.setItem('palmscan_drill_block_id', String(drillBlockId));
+      else localStorage.removeItem('palmscan_drill_block_id');
+    } catch {}
+  }, [drillBlockId]);
+
+  // ── Seed scannedBlocksRef from localStorage on first mount ───────────────────
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('palmscan_tls_scanned');
+      if (raw) (JSON.parse(raw) as number[]).forEach((id) => scannedBlocksRef.current.add(id));
+    } catch {}
+  }, []);
+
+  // ── Auto-drill: prop (audit report) OR localStorage (estate scan restore) ────
+  useEffect(() => {
+    if (!mapReady || defaultDrillAppliedRef.current) return;
+    defaultDrillAppliedRef.current = true;
+
+    if (defaultDrillBlockId != null) {
+      scannedBlocksRef.current.add(defaultDrillBlockId);
+      setDrillBlockId(defaultDrillBlockId);
+      return;
+    }
+
+    // Restore saved drill state for the estate scan page
+    try {
+      const savedId = localStorage.getItem('palmscan_drill_block_id');
+      if (savedId !== null) {
+        const blockId = Number(savedId);
+        if (allBlockDrillData[blockId] && scannedBlocksRef.current.has(blockId)) {
+          setDrillBlockId(blockId);
+        }
+      }
+    } catch {}
+  }, [mapReady, defaultDrillBlockId]);
   useEffect(() => { tlsScanPhaseRef.current = tlsScanPhase; }, [tlsScanPhase]);
   useEffect(() => {
     const data = drillBlockId !== null && tlsScanPhase === 'done' ? allBlockDrillData[drillBlockId] ?? null : null;
@@ -1278,6 +1319,8 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
     try { localStorage.removeItem(SCAN_RESULTS_KEY); } catch {}
     try { localStorage.removeItem('palmscan_scan_done'); } catch {}
     try { localStorage.removeItem('palmscan_fulltls_done'); } catch {}
+    try { localStorage.removeItem('palmscan_tls_scanned'); } catch {}
+    try { localStorage.removeItem('palmscan_drill_block_id'); } catch {}
 
     // Exit any compartment/draw view so the full toolbar is visible
     const draw = drawRef.current;
@@ -1744,6 +1787,7 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
             const ds = map.getSource('tls-tree-dots') as mapboxgl.GeoJSONSource | undefined;
             if (ds) ds.setData(data.trees as GeoJSON.GeoJSON);
             scannedBlocksRef.current.add(blockId);
+            try { localStorage.setItem('palmscan_tls_scanned', JSON.stringify([...scannedBlocksRef.current])); } catch {}
             setTlsScanPhase('done');
             setTlsScanProgress(100);
           }
@@ -2234,15 +2278,6 @@ export default function MapView({ drawnFields, selectedId, onSelect, onFieldsCha
                 style={{ background: scanComplete ? 'rgba(22,101,52,0.6)' : '#e07c3a', border: scanComplete ? '1px solid rgba(74,222,128,0.25)' : 'none' }}>
                 {scanComplete ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Scan className="w-4 h-4" />}
                 <span>{scanComplete ? '① Drone Done' : '① Drone Scan Estate'}</span>
-              </button>
-              <div className="w-px h-8 bg-white/10 flex-shrink-0" />
-              {/* Step 2: Full TLS Scan */}
-              <button
-                onClick={scanComplete && fullScanPhase === 'idle' ? handleFullEstateScan : undefined}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${!scanComplete ? 'opacity-40 cursor-not-allowed' : fullScanPhase === 'idle' ? 'btn-tls-ring hover:brightness-110' : 'cursor-default'}`}
-                style={{ background: !scanComplete ? '#0f1a12' : fullScanPhase === 'done' ? 'rgba(6,78,59,0.6)' : '#065f46', border: scanComplete && fullScanPhase !== 'done' ? '1px solid rgba(52,211,153,0.35)' : 'none' }}>
-                {fullScanPhase === 'done' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Scan className={`w-4 h-4 ${scanComplete ? 'text-emerald-300' : 'text-gray-600'}`} />}
-                <span>{fullScanPhase === 'done' ? '② TLS Done' : '② Full TLS Scan'}</span>
               </button>
             </div>
           )}

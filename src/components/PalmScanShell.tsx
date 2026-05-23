@@ -27,11 +27,12 @@ function getFirstScannedCompartmentId(): string | null {
 const PalmScanMapView = lazy(() => import('./maps/PalmScanMapView'));
 
 type PalmScanShellProps = {
-  autoEnter?:        boolean;
-  hideScanControls?: boolean;
+  autoEnter?:          boolean;
+  hideScanControls?:   boolean;
+  defaultDrillBlockId?: number;
 };
 
-export default function PalmScanShell({ autoEnter = false, hideScanControls = false }: PalmScanShellProps) {
+export default function PalmScanShell({ autoEnter = false, hideScanControls = false, defaultDrillBlockId }: PalmScanShellProps) {
   const [drawnFields, setDrawnFields] = useState<DrawnField[]>(() => loadFromStorage());
   const [selectedId,  setSelectedId]  = useState<string | null>(null);
 
@@ -63,6 +64,7 @@ export default function PalmScanShell({ autoEnter = false, hideScanControls = fa
           onFieldsChange={handleFieldsChange}
           defaultCompartmentId={defaultCompartmentId}
           hideScanControls={hideScanControls}
+          defaultDrillBlockId={defaultDrillBlockId}
         />
       </Suspense>
     </div>
